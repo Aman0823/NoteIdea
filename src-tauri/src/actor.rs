@@ -257,6 +257,31 @@ pub enum Step {
 pub async fn step(db: &crate::db::Handle, vault_root: &Path) -> Step {
     let Some(row) = next_pending(db) else { return Step::Empty };
 
+    // 崩溃窗口：文件已写成功、但删队列记录之前进程死了。重启后重放，
+    // append 会静默多出一行——四种操作里只有它是不幂等的。
+    //
+    // 另外三种重放的后果是可见的（内容已变→定位失败；文件已存在→拒绝），
+    // 会变成一条用户看得懂、能丢弃的失败记录，不会悄悄改坏数据。
+    if let Operation::Append { content } = &row.cs.op {
+        if row.attempted {
+            match already_appended(vault_root, &row.cs.file_path, content) {
+                Ok(true) => {
+                    // 上次其实写成功了，只是没来得及删记录。补删，不重写。
+                    println!("[actor] {} 的追加已生效，跳过重放", row.cs.file_path);
+                    delete_row(db, row.id);
+                    return Step::Done(row.cs);
+                }
+                Ok(false) => {}
+                // 读不了文件就当没写过：宁可重放一次（最多多一行），
+                // 也不能因为读失败就丢掉用户的内容。
+                Err(e) => eprintln!("[actor] 无法确认是否已追加，按未写过处理: {e}"),
+            }
+        } else {
+            // 必须先记「已尝试」再动文件。顺序反了这层保护就不存在了。
+            mark_attempted(db, row.id);
+        }
+    }
+
     // 单条记录的 panic 不能杀掉整个 actor task——否则一条坏数据会让
     // 应用彻底失去写入能力，且用户完全不知道为什么。
     let outcome =
@@ -285,17 +310,38 @@ pub async fn step(db: &crate::db::Handle, vault_root: &Path) -> Step {
     }
 }
 
+/// 追加内容是否已经在文件末尾了。
+///
+/// 判据是「文件末尾恰好是这段内容」。append 会补规范化换行，所以比对时
+/// 也要按同样规则补一次，否则永远不匹配。
+fn already_appended(vault_root: &Path, file_path: &str, content: &str) -> Result<bool, String> {
+    let path = resolve(vault_root, file_path).map_err(|e| e.to_string())?;
+    let current = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(format!("读文件失败: {e}")),
+    };
+
+    let mut expected = content.to_string();
+    if !expected.ends_with('\n') {
+        expected.push('\n');
+    }
+    Ok(current.ends_with(&expected))
+}
+
 struct QueueRow {
     id: i64,
     cs: ChangeSet,
     retries: i64,
+    /// 这条是否已经动过文件。用于区分「首次处理」和「崩溃后重放」。
+    attempted: bool,
 }
 
 /// 取下一条待处理。`retries >= 0` 排除已放弃的（-1）。
 fn next_pending(db: &crate::db::Handle) -> Option<QueueRow> {
     db.with(|conn| {
         conn.query_row(
-            "SELECT id, file_path, payload, base_hash, retries
+            "SELECT id, file_path, payload, base_hash, retries, applied_marker
              FROM write_queue WHERE retries >= 0 ORDER BY id LIMIT 1",
             [],
             |r| {
@@ -306,6 +352,7 @@ fn next_pending(db: &crate::db::Handle) -> Option<QueueRow> {
                     payload,
                     r.get::<_, Option<String>>(3)?,
                     r.get::<_, i64>(4)?,
+                    r.get::<_, Option<String>>(5)?,
                 ))
             },
         )
@@ -317,9 +364,14 @@ fn next_pending(db: &crate::db::Handle) -> Option<QueueRow> {
     })
     .ok()
     .flatten()
-    .and_then(|(id, file_path, payload, base_hash, retries)| {
+    .and_then(|(id, file_path, payload, base_hash, retries, marker)| {
         match serde_json::from_str::<Operation>(&payload) {
-            Ok(op) => Some(QueueRow { id, cs: ChangeSet { file_path, op, base_hash }, retries }),
+            Ok(op) => Some(QueueRow {
+                id,
+                cs: ChangeSet { file_path, op, base_hash },
+                retries,
+                attempted: marker.is_some(),
+            }),
             Err(e) => {
                 // 队列里存了读不出来的东西，留着会卡死整个队列。
                 eprintln!("[actor] 队列记录 {id} 无法解析，丢弃: {e}");
@@ -333,6 +385,18 @@ fn next_pending(db: &crate::db::Handle) -> Option<QueueRow> {
 fn delete_row(db: &crate::db::Handle, id: i64) {
     let _ = db.with(|conn| {
         conn.execute("DELETE FROM write_queue WHERE id = ?1", [id])?;
+        Ok(())
+    });
+}
+
+/// 标记「即将动文件」。必须在实际写盘之前调用。
+fn mark_attempted(db: &crate::db::Handle, id: i64) {
+    let now = crate::db::now_ms();
+    let _ = db.with(|conn| {
+        conn.execute(
+            "UPDATE write_queue SET applied_marker = ?2, updated_at = ?2 WHERE id = ?1",
+            rusqlite::params![id, now],
+        )?;
         Ok(())
     });
 }
@@ -935,5 +999,92 @@ mod tests {
         let db = mem_db();
         assert!(!reset_failed(&db, 999).unwrap());
         assert!(!discard_failed(&db, 999).unwrap());
+    }
+
+    // ---------- 崩溃重放保护 ----------
+
+    fn marker_of(db: &crate::db::Handle, id: i64) -> Option<String> {
+        db.with(|c| {
+            c.query_row("SELECT applied_marker FROM write_queue WHERE id = ?1", [id], |r| r.get(0))
+        })
+        .unwrap()
+    }
+
+    fn insert_crashed_append(db: &crate::db::Handle, content: &str) {
+        let payload =
+            serde_json::to_string(&Operation::Append { content: content.into() }).unwrap();
+        db.with(|c| {
+            c.execute(
+                "INSERT INTO write_queue
+                 (file_path, operation, payload, retries, applied_marker, created_at, updated_at)
+                 VALUES ('inbox.md', 'append', ?1, 0, '1', 1, 1)",
+                rusqlite::params![payload],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn append_is_not_replayed_after_crash() {
+        let t = Tmp::new("no-replay");
+        let db = mem_db();
+        t.write("inbox.md", "- [ ] 只该出现一次\n");
+        insert_crashed_append(&db, "- [ ] 只该出现一次");
+
+        while !matches!(step(&db, &t.0).await, Step::Empty) {}
+
+        assert_eq!(t.read("inbox.md"), "- [ ] 只该出现一次\n", "崩溃重放不得产生重复行");
+        assert_eq!(queue_len(&db), 0);
+    }
+
+    #[tokio::test]
+    async fn append_is_replayed_when_write_did_not_happen() {
+        let t = Tmp::new("do-replay");
+        let db = mem_db();
+        insert_crashed_append(&db, "- [ ] 没写成");
+
+        while !matches!(step(&db, &t.0).await, Step::Empty) {}
+
+        assert_eq!(t.read("inbox.md"), "- [ ] 没写成\n", "确实没写成的必须补写，不能丢");
+    }
+
+    #[tokio::test]
+    async fn marker_is_set_before_touching_file() {
+        let t = Tmp::new("marker-order");
+        let db = mem_db();
+        let id =
+            enqueue_to_db(&db, &cs("inbox.md", Operation::Append { content: "x".into() }, None))
+                .unwrap();
+        assert!(marker_of(&db, id).is_none(), "入队时不该有 marker");
+
+        // 让它失败在写盘阶段：把目标做成目录，怎么都写不进去
+        std::fs::create_dir(t.0.join("inbox.md")).unwrap();
+        let _ = step(&db, &t.0).await;
+
+        // 即便写失败，marker 也必须已置上。顺序反了这层保护就不存在了。
+        assert!(marker_of(&db, id).is_some(), "step 应在动文件之前记下 marker");
+    }
+
+    #[tokio::test]
+    async fn legitimate_duplicate_append_still_works() {
+        let t = Tmp::new("dup-ok");
+        let db = mem_db();
+        // 用户真的连着记了两条一样的，两条都得在
+        for _ in 0..2 {
+            enqueue_to_db(
+                &db,
+                &cs("inbox.md", Operation::Append { content: "- [ ] 买菜".into() }, None),
+            )
+            .unwrap();
+        }
+
+        while !matches!(step(&db, &t.0).await, Step::Empty) {}
+
+        assert_eq!(
+            t.read("inbox.md"),
+            "- [ ] 买菜\n- [ ] 买菜\n",
+            "重放保护只针对崩溃恢复，不该压掉用户真实的重复输入"
+        );
     }
 }
