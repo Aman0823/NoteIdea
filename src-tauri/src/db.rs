@@ -176,7 +176,7 @@ pub fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-const SCHEMA_SQL: &str = r#"
+pub(crate) const SCHEMA_SQL: &str = r#"
 -- 写队列：未完成的 ChangeSet。落库是为了进程崩溃后能继续处理。
 CREATE TABLE IF NOT EXISTS write_queue (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
