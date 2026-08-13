@@ -6,13 +6,12 @@
 //!
 //! 已落地的架构决策：D22（窗口预热）、D23（单实例）、FR-13（托盘常驻）、FR-21（热键失败提示）。
 
+mod actor;
 mod config;
 mod db;
 mod vault;
 mod window;
 
-use std::fs::OpenOptions;
-use std::io::Write;
 use std::sync::Mutex;
 
 use tauri::menu::{Menu, MenuItem};
@@ -27,31 +26,37 @@ pub struct VaultState(pub Mutex<VaultStatus>);
 
 /// 追加一行到 inbox.md（FR-19 / D14）。
 ///
-/// 此步仍是直写，只是路径来源从硬编码改为读配置（tasks 2.7）。
-/// 下一组任务会把它切到单写者 actor。
+/// 走单写者 actor（D17）。返回代表「已入队」而非「已落盘」——落盘结果
+/// 通过 `file:changed` / `write:failed` 事件通知，这样速记条能立刻关窗。
+///
+/// 这里无条件加 `- [ ]` 前缀是骨架期的简化，正式版应由 3.2 的语法解析决定。
 #[tauri::command]
-fn capture(text: String, vault: State<'_, VaultState>) -> Result<(), String> {
+async fn capture(
+    text: String,
+    vault: State<'_, VaultState>,
+    actor: State<'_, actor::Handle>,
+) -> Result<(), String> {
     let text = text.trim();
     if text.is_empty() {
         return Ok(());
     }
 
     // degraded 状态下不静默丢弃用户刚敲的内容，而是明确告知原因。
-    let status = vault.0.lock().map_err(|_| "vault 状态锁失败")?.clone();
-    let Some(dir) = status.ready_path() else {
-        return Err(status.reason().unwrap_or_else(|| "笔记目录不可用".into()));
-    };
+    {
+        let status = vault.0.lock().map_err(|_| "vault 状态锁失败")?;
+        if let Some(reason) = status.reason() {
+            return Err(reason);
+        }
+    }
 
-    let path = vault::inbox_path(dir);
-    let mut f = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|e| format!("打开 inbox.md 失败: {e}"))?;
-
-    writeln!(f, "- [ ] {text}").map_err(|e| format!("写入失败: {e}"))?;
-    println!("[capture] 已写入 {}", path.display());
-    Ok(())
+    actor
+        .enqueue(actor::ChangeSet {
+            file_path: vault::INBOX.to_string(),
+            op: actor::Operation::Append { content: format!("- [ ] {text}") },
+            base_hash: None, // append 不关心基线
+        })
+        .await
+        .map(|_| ())
 }
 
 /// vault 当前是否可用，以及不可用的原因。前端据此决定是否显示选择入口。
@@ -200,6 +205,8 @@ pub fn run() {
                 match db::open(&vault::db_path(&path)) {
                     Ok(conn) => {
                         app.manage(db::Handle::new(conn));
+                        // actor 必须在 DB 就绪后启动：它启动时就会去排空遗留队列。
+                        app.manage(actor::spawn(handle.clone(), path.clone()));
                     }
                     Err(e) => {
                         eprintln!("[db] 打开失败: {e}");

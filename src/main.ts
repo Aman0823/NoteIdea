@@ -106,5 +106,14 @@ document.querySelector<HTMLButtonElement>('#choose-vault')!.addEventListener('cl
 
 listen('vault:changed', refreshVault);
 
+// 写入失败（重试耗尽）。actor 走的是异步落盘，失败必须让用户看到，
+// 否则会以为记下来了而实际没有。
+listen<{ file: string; op: string; error: string }>('write:failed', (e) => {
+  const box = document.createElement('div');
+  box.className = 'warn';
+  box.textContent = `写入 ${e.payload.file} 失败：${e.payload.error}`;
+  warningsEl.append(box);
+});
+
 refreshVault();
 refresh();

@@ -29,20 +29,21 @@
 
 ## 4. FileWriteActor 核心
 
-- [ ] 4.1 新建 `actor.rs`：定义 `ChangeSet`（file_path、operation、payload、base_hash）与 `WriteRequest` 枚举
-- [ ] 4.2 实现 `spawn`：起 tokio task，持有 DB 连接与 vault 根路径，返回 sender
-- [ ] 4.3 实现原子写盘：同目录临时文件 + fsync + rename，**实测 Windows 上目标已存在时的 rename 行为**并处理
-- [ ] 4.4 实现 `append` 操作（不校验 base_hash）
-- [ ] 4.5 实现入队：先 INSERT 进 `write_queue`，再唤醒处理
-- [ ] 4.6 实现处理循环：取队首 → 应用 → 成功则文件写盘后在同事务内 DELETE 记录 → 广播事件
-- [ ] 4.7 每条 ChangeSet 处理包 `catch_unwind`，单条 panic 不杀 task
-- [ ] 4.8 sender 发送失败（task 已死）时，command 层作为写入失败上报，不静默丢弃
+- [x] 4.1 新建 `actor.rs`：定义 `ChangeSet`（file_path、op、base_hash）与 `Request` 枚举
+- [x] 4.2 实现 `spawn`：起 tokio task，持有 vault 根路径，返回 `Handle`
+- [x] 4.3 实现原子写盘：同目录临时文件 + fsync + rename；**已实测 Windows 上 rename 可覆盖已存在目标**
+- [x] 4.4 实现 `append` 操作（不校验 base_hash；读全文补换行再原子写，避免上一行缺换行时黏行）
+- [x] 4.5 实现入队：先 INSERT 进 `write_queue`，再唤醒处理
+- [x] 4.6 实现处理循环：取队首 → 应用 → 成功则 DELETE 记录 → 广播 `file:changed`
+- [x] 4.7 每条 ChangeSet 处理包 `catch_unwind`，单条 panic 不杀 task
+- [x] 4.8 sender 发送失败（task 已死）时，command 层作为写入失败上报，不静默丢弃
+- [x] 4.9 路径逃逸防护：拒绝绝对路径与含 `..` 的路径（file_path 可能来自外部输入）
 
 ## 5. capture 切换到 actor
 
-- [ ] 5.1 `capture` 改为构造 append 类型 ChangeSet 并入队，前端签名保持不变
-- [ ] 5.2 落盘成功后 emit `file:changed`，载荷含 file_path 与 operation
-- [ ] 5.3 速记条：入队成功即关窗，不等落盘
+- [x] 5.1 `capture` 改为构造 append 类型 ChangeSet 并入队，前端签名保持不变
+- [x] 5.2 落盘成功后 emit `file:changed`，载荷含 file 与 op；失败 emit `write:failed`，主窗口显示
+- [x] 5.3 速记条：入队成功即关窗，不等落盘
 - [ ] 5.4 验证：连续快速输入 10 条，全部按顺序写入 inbox.md，无丢失无重复
 - [ ] 5.5 回归延迟测量，确认 p95 未变差
 
