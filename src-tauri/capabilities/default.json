@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "骨架期最小权限。窗口显示/聚焦全部由 Rust 侧执行，前端只用 invoke 调本包命令和 listen 收事件，因此 core:default 足够。",
+  "windows": ["main", "quick"],
+  "permissions": ["core:default", "dialog:allow-open"]
+}

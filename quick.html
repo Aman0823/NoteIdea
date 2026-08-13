@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>速记</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body class="quick">
+    <div class="bar">
+      <input
+        id="input"
+        type="text"
+        autocomplete="off"
+        spellcheck="false"
+        placeholder="记一句话…  Enter 存入 inbox，Esc 取消"
+      />
+      <span id="latency" class="latency"></span>
+    </div>
+    <script type="module" src="/src/quick.ts"></script>
+  </body>
+</html>

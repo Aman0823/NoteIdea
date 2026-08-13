@@ -1,0 +1,56 @@
+schema: spec-driven
+
+context: |
+  项目：NoteIdea —— 笔记本 + 贴屏便签 + 定时提醒的 Windows 桌面应用。
+  技术栈：Tauri 2（Rust）+ Vite 6 + TypeScript strict + 原生 DOM（无前端框架）。
+  编辑器内核将采用 CodeMirror 6 + decoration。数据库为 SQLite（rusqlite bundled）。
+
+  权威需求文档：仓库根目录 REQUIREMENTS.md（不进版本库，含 D1-D23 架构决策与 FR/NFR/SR 编号）。
+  写 spec 与 design 时须引用这些既有编号，不要重新论证已锁定的决策。
+
+  两条最重要的既有约束：
+  - D9：markdown 是唯一真源，SQLite 只存可重建的派生数据与运行状态。删库重扫，用户不该觉得丢了任何自己写下的东西。
+  - D17：所有 md 写入必须经由 Rust 单写者 actor，且提交行级 ChangeSet 而非全文。
+
+  沟通与文档语言：中文。
+
+rules:
+  specs:
+    - 用中文书写。规范性语句用「必须 / 不得 / 应 / 可」表达强制程度，对应 RFC 2119 的
+      MUST / MUST NOT / SHOULD / MAY。--strict 模式会因为找不到英文 MUST/SHALL 而告警，
+      这些告警在中文规格下预期存在，可以忽略。
+    - 每条 requirement 至少覆盖一个失败场景或边界场景，不要只写顺利路径。
+  design:
+    - 每个技术决策都要写明否决了什么方案及否决理由，不只写选了什么。
+    - Open Questions 只放真正可延后的未知项；会影响 spec、方案或任务拆分的问题必须当场问用户。
+
+# Project context (optional)
+# This is shown to AI when creating artifacts.
+# Add your tech stack, conventions, style guides, domain knowledge, etc.
+# Example:
+#   context: |
+#     Tech stack: TypeScript, React, Node.js
+#     We use conventional commits
+#     Domain: e-commerce platform
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always include a "Non-goals" section
+#     tasks:
+#       - Break tasks into chunks of max 2 hours
+
+# Per-operation guidance (optional)
+# Add advisory guidance for how apply and archive work should be conducted.
+# This is separate from artifact rules above.
+# Example:
+#   operations:
+#     apply:
+#       guidance:
+#         - Keep test summaries concise
+#     archive:
+#       guidance:
+#         - Summarize the archive outcome before finishing

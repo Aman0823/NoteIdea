@@ -1,0 +1,26 @@
+# 需求与早期设计文档：按要求不进版本库
+# （设计已迁到 openspec/changes/*/design.md，根目录这份是迁移前的草稿）
+REQUIREMENTS.md
+DESIGN.md
+
+# 依赖与构建产物
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+
+# 运行期数据
+# 前导 / 是必需的：不加会连 openspec/changes/*/specs/vault/ 一起忽略掉
+/vault/
+.noteidea/
+
+# 本地个人配置（权限白名单等），不共享
+.claude/settings.local.json
+
+# 编辑器 / 系统
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.log
+Thumbs.db
+Desktop.ini

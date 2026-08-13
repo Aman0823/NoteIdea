@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NoteIdea</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body class="main">
+    <main>
+      <h1>NoteIdea 骨架</h1>
+      <p class="lead">
+        这一期只验证一件事：<strong>热键按下到速记条可输入的真实延迟</strong>（NFR-2 定的成败线是
+        200ms）。数字达不到，D22 的预热方案和一串下游决策都要重写。
+      </p>
+
+      <section id="vault-card" class="card hidden">
+        <h2>笔记存放位置</h2>
+        <p id="vault-reason" class="hint" style="border: 0; margin-top: 0; padding-top: 0"></p>
+        <button id="choose-vault" type="button">选择笔记文件夹</button>
+      </section>
+
+      <section class="card">
+        <h2>怎么测</h2>
+        <ol>
+          <li>按 <kbd>Alt</kbd> + <kbd>Space</kbd> 唤出速记条，敲点字，<kbd>Enter</kbd> 存入 inbox，或 <kbd>Esc</kbd> 取消。</li>
+          <li>反复唤出十几次（第一次通常最慢，之后进入稳态）。</li>
+          <li>回到这里点「刷新测量结果」。</li>
+        </ol>
+        <p class="hint">
+          计时全部在 Rust 侧的单调时钟上完成：热键触发记起点，前端聚焦输入框并等一帧真正绘制完成后回调记终点。
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>测量结果</h2>
+        <button id="refresh" type="button">刷新测量结果</button>
+        <div id="stats" class="stats">尚无数据。先按 Alt+Space 试几次。</div>
+        <ul id="samples" class="samples"></ul>
+      </section>
+
+      <section class="card">
+        <h2>其他可验证的点</h2>
+        <ul class="checks">
+          <li><kbd>Alt</kbd> + <kbd>N</kbd> 唤出本窗口（FR-20）</li>
+          <li>关闭本窗口只隐藏、进程留在托盘（FR-13）</li>
+          <li>托盘左键 = 速记条，右键菜单可退出</li>
+          <li>再启动一个实例，应当聚焦已有实例并弹速记条，而不是开第二个进程（D23）</li>
+          <li>速记条写入的内容落在 <code>vault/inbox.md</code></li>
+        </ul>
+        <div id="warnings" class="warnings"></div>
+      </section>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,30 @@
+[package]
+name = "note-idea"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.77"
+description = "笔记本 + 贴屏便签 + 定时提醒"
+publish = false
+
+[lib]
+name = "note_idea_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri-plugin-dialog = "2.7.2"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+blake3 = "1.8"
+anyhow = "1"
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+dirs = "6"
+
+[profile.dev]
+incremental = true
