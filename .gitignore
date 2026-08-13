@@ -1,7 +1,9 @@
 # 需求与早期设计文档：按要求不进版本库
 # （设计已迁到 openspec/changes/*/design.md，根目录这份是迁移前的草稿）
-REQUIREMENTS.md
-DESIGN.md
+# 前导 / 是必需的：Windows 上 core.ignorecase=true，不加 / 会把
+# openspec/changes/*/design.md 一并忽略掉
+/REQUIREMENTS.md
+/DESIGN.md
 
 # 依赖与构建产物
 node_modules/
