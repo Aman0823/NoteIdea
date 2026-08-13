@@ -66,6 +66,37 @@ fn vault_state(vault: State<'_, VaultState>) -> Result<Option<String>, String> {
     Ok(status.reason())
 }
 
+/// 已放弃的写入列表（FR：写失败不得静默丢弃）。
+#[tauri::command]
+fn failed_writes(app: AppHandle) -> Result<Vec<actor::FailedWrite>, String> {
+    // vault 不可用时没有 DB，此时没有失败列表可言，返回空而非报错。
+    let Some(db) = app.try_state::<db::Handle>() else { return Ok(Vec::new()) };
+    actor::list_failed(&db)
+}
+
+/// 重试一条失败的写入。
+#[tauri::command]
+fn retry_write(
+    id: i64,
+    db: State<'_, db::Handle>,
+    actor: State<'_, actor::Handle>,
+) -> Result<(), String> {
+    if !actor::reset_failed(&db, id)? {
+        return Err("该记录已不存在或不处于失败状态".into());
+    }
+    actor.drain();
+    Ok(())
+}
+
+/// 丢弃一条失败的写入。用户主动放弃这次修改。
+#[tauri::command]
+fn discard_write(id: i64, db: State<'_, db::Handle>) -> Result<(), String> {
+    if !actor::discard_failed(&db, id)? {
+        return Err("该记录已不存在或不处于失败状态".into());
+    }
+    Ok(())
+}
+
 /// 用户选定 vault 目录后调用：初始化结构、存配置、更新运行期状态。
 #[tauri::command]
 fn choose_vault(
@@ -187,7 +218,10 @@ pub fn run() {
             window::hotkey_failures,
             capture,
             vault_state,
-            choose_vault
+            choose_vault,
+            failed_writes,
+            retry_write,
+            discard_write
         ])
         .setup(|app| {
             let handle = app.handle().clone();

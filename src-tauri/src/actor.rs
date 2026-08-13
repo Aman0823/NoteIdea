@@ -106,9 +106,67 @@ impl Handle {
         rx.await.map_err(|_| "写入服务无响应".to_string())?
     }
 
+    /// 唤醒处理循环（用户点重试后调用）。
     pub fn drain(&self) {
         let _ = self.0.send(Request::Drain);
     }
+}
+
+/// 一条放弃了的写入，供主窗口展示（spec：用户查看失败列表）。
+#[derive(Debug, Clone, Serialize)]
+pub struct FailedWrite {
+    pub id: i64,
+    pub file: String,
+    pub op: String,
+    pub error: String,
+    /// 毫秒时间戳，前端自己格式化。
+    pub at: i64,
+}
+
+/// 列出已放弃的写入（`retries < 0`）。
+pub fn list_failed(db: &crate::db::Handle) -> Result<Vec<FailedWrite>, String> {
+    db.with(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT id, file_path, operation, COALESCE(last_error, '未知原因'), updated_at
+             FROM write_queue WHERE retries < 0 ORDER BY id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(FailedWrite {
+                id: r.get(0)?,
+                file: r.get(1)?,
+                op: r.get(2)?,
+                error: r.get(3)?,
+                at: r.get(4)?,
+            })
+        })?;
+        rows.collect()
+    })
+}
+
+/// 把一条已放弃的记录重置为待处理，让它重新参与队列。
+///
+/// 限定 `retries < 0`：正在正常重试中的记录不该被外部打扰。
+pub fn reset_failed(db: &crate::db::Handle, id: i64) -> Result<bool, String> {
+    let now = crate::db::now_ms();
+    db.with(|conn| {
+        let n = conn.execute(
+            "UPDATE write_queue SET retries = 0, last_error = NULL, updated_at = ?2
+             WHERE id = ?1 AND retries < 0",
+            rusqlite::params![id, now],
+        )?;
+        Ok(n > 0)
+    })
+}
+
+/// 丢弃一条已放弃的记录。
+///
+/// 这是**用户主动放弃这次修改**，是唯一允许删除未落盘变更的路径，
+/// 因此同样限定 `retries < 0`，避免误删正在重试的记录。
+pub fn discard_failed(db: &crate::db::Handle, id: i64) -> Result<bool, String> {
+    db.with(|conn| {
+        let n = conn.execute("DELETE FROM write_queue WHERE id = ?1 AND retries < 0", [id])?;
+        Ok(n > 0)
+    })
 }
 
 /// 启动 actor。返回句柄，同时把遗留队列排空（崩溃恢复）。
@@ -788,5 +846,94 @@ mod tests {
         assert_eq!(t.read("inbox.md"), "- [ ] 崩溃前
 ", "重启后应补写");
         assert_eq!(queue_len(&db), 0);
+    }
+
+    // ---------- 失败列表 ----------
+
+    /// 让一条记录进入「已放弃」状态，返回其 id。
+    async fn make_failed(db: &crate::db::Handle, t: &Tmp) -> i64 {
+        t.write("n.md", "已有
+");
+        let id =
+            enqueue_to_db(db, &cs("n.md", Operation::Create { content: "x".into() }, None)).unwrap();
+        assert!(matches!(step(db, &t.0).await, Step::Failed(..)));
+        id
+    }
+
+    #[tokio::test]
+    async fn failed_list_shows_reason_and_op() {
+        let t = Tmp::new("list");
+        let db = mem_db();
+        make_failed(&db, &t).await;
+
+        let rows = list_failed(&db).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].file, "n.md");
+        assert_eq!(rows[0].op, "create");
+        assert!(rows[0].error.contains("已存在"), "要能看到失败原因: {}", rows[0].error);
+        assert!(rows[0].at > 0);
+    }
+
+    #[tokio::test]
+    async fn retry_puts_row_back_in_queue() {
+        let t = Tmp::new("retry");
+        let db = mem_db();
+        let id = make_failed(&db, &t).await;
+
+        // 队列已空（那条被标记为放弃，不再取出）
+        assert!(matches!(step(&db, &t.0).await, Step::Empty));
+
+        assert!(reset_failed(&db, id).unwrap());
+        assert!(list_failed(&db).unwrap().is_empty(), "重置后不该还在失败列表里");
+
+        // 原因没修好（文件仍存在），所以会再次失败——这是对的
+        assert!(matches!(step(&db, &t.0).await, Step::Failed(..)));
+
+        // 修好原因后重试应当成功
+        std::fs::remove_file(t.0.join("n.md")).unwrap();
+        assert!(reset_failed(&db, id).unwrap());
+        assert!(matches!(step(&db, &t.0).await, Step::Done(_)));
+        assert_eq!(t.read("n.md"), "x");
+        assert!(list_failed(&db).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn discard_removes_row() {
+        let t = Tmp::new("discard");
+        let db = mem_db();
+        let id = make_failed(&db, &t).await;
+
+        assert!(discard_failed(&db, id).unwrap());
+        assert!(list_failed(&db).unwrap().is_empty());
+        assert_eq!(queue_len(&db), 0);
+        assert_eq!(t.read("n.md"), "已有
+", "丢弃只影响队列，不该动文件");
+    }
+
+    #[tokio::test]
+    async fn retry_and_discard_ignore_non_failed_rows() {
+        let t = Tmp::new("guard");
+        let db = mem_db();
+        // 一条正常待处理的记录（retries = 0）
+        let id =
+            enqueue_to_db(&db, &cs("inbox.md", Operation::Append { content: "a".into() }, None))
+                .unwrap();
+
+        // 正在正常排队的记录不该被这两个操作碰到
+        assert!(!reset_failed(&db, id).unwrap());
+        assert!(!discard_failed(&db, id).unwrap());
+        assert_eq!(queue_len(&db), 1, "记录必须还在");
+
+        // 它仍应能正常落盘
+        assert!(matches!(step(&db, &t.0).await, Step::Done(_)));
+        assert_eq!(t.read("inbox.md"), "a
+");
+    }
+
+    #[tokio::test]
+    async fn operations_on_missing_id_report_false() {
+        let db = mem_db();
+        assert!(!reset_failed(&db, 999).unwrap());
+        assert!(!discard_failed(&db, 999).unwrap());
     }
 }

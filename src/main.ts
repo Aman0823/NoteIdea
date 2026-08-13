@@ -106,14 +106,89 @@ document.querySelector<HTMLButtonElement>('#choose-vault')!.addEventListener('cl
 
 listen('vault:changed', refreshVault);
 
-// 写入失败（重试耗尽）。actor 走的是异步落盘，失败必须让用户看到，
-// 否则会以为记下来了而实际没有。
-listen<{ file: string; op: string; error: string }>('write:failed', (e) => {
-  const box = document.createElement('div');
-  box.className = 'warn';
-  box.textContent = `写入 ${e.payload.file} 失败：${e.payload.error}`;
-  warningsEl.append(box);
-});
+// ---------- 写入失败列表 ----------
+
+const failedCard = document.querySelector<HTMLElement>('#failed-card')!;
+const failedList = document.querySelector<HTMLUListElement>('#failed-list')!;
+
+interface FailedWrite {
+  id: number;
+  file: string;
+  op: string;
+  error: string;
+  at: number;
+}
+
+const OP_LABEL: Record<string, string> = {
+  append: '追加',
+  replace_line: '改行',
+  create: '新建',
+  replace_file: '整篇替换',
+};
+
+async function refreshFailed() {
+  const rows = await invoke<FailedWrite[]>('failed_writes');
+  failedCard.classList.toggle('hidden', rows.length === 0);
+  failedList.replaceChildren();
+
+  for (const row of rows) {
+    const li = document.createElement('li');
+
+    const head = document.createElement('div');
+    head.className = 'failed-head';
+    const file = document.createElement('strong');
+    file.textContent = row.file;
+    const op = document.createElement('span');
+    op.className = 'failed-op';
+    op.textContent = OP_LABEL[row.op] ?? row.op;
+    const when = document.createElement('span');
+    when.className = 'failed-op';
+    when.textContent = new Date(row.at).toLocaleString('zh-CN');
+    head.append(file, op, when);
+
+    const why = document.createElement('div');
+    why.className = 'failed-why';
+    why.textContent = row.error;
+
+    const actions = document.createElement('div');
+    actions.className = 'failed-actions';
+    const retry = document.createElement('button');
+    retry.type = 'button';
+    retry.textContent = '重试';
+    const discard = document.createElement('button');
+    discard.type = 'button';
+    discard.textContent = '丢弃';
+
+    for (const [btn, cmd] of [
+      [retry, 'retry_write'],
+      [discard, 'discard_write'],
+    ] as const) {
+      btn.addEventListener('click', async () => {
+        retry.disabled = true;
+        discard.disabled = true;
+        try {
+          await invoke(cmd, { id: row.id });
+        } catch (e) {
+          why.textContent = `操作失败：${String(e)}`;
+          retry.disabled = false;
+          discard.disabled = false;
+          return;
+        }
+        await refreshFailed();
+      });
+    }
+
+    actions.append(retry, discard);
+    li.append(head, why, actions);
+    failedList.append(li);
+  }
+}
+
+// actor 走异步落盘，失败必须让用户看到，否则会以为记下来了而实际没有。
+listen('write:failed', refreshFailed);
+// 重试成功后那条会从失败列表消失。
+listen('file:changed', refreshFailed);
 
 refreshVault();
+refreshFailed();
 refresh();

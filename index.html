@@ -39,6 +39,15 @@
         <ul id="samples" class="samples"></ul>
       </section>
 
+      <section id="failed-card" class="card hidden">
+        <h2>写入失败</h2>
+        <p class="hint" style="border: 0; margin-top: 0; padding-top: 0">
+          这些修改重试三次后仍未写入磁盘，内容还留着。修好原因（比如权限、磁盘空间）后点重试，
+          或者确认不要了再丢弃。
+        </p>
+        <ul id="failed-list" class="failed"></ul>
+      </section>
+
       <section class="card">
         <h2>其他可验证的点</h2>
         <ul class="checks">
