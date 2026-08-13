@@ -19,13 +19,13 @@
 
 ## 3. SQLite 持久化层
 
-- [ ] 3.1 加 `rusqlite`（bundled）依赖
-- [ ] 3.2 新建 `db.rs`：连接打开、WAL 模式、`PRAGMA integrity_check`
-- [ ] 3.3 建 schema：`write_queue`、`reminders`、`app_state` 三表 + 索引 + schema 版本记录
-- [ ] 3.4 实现迁移框架（读 schema 版本，按需升级）
-- [ ] 3.5 实现损坏与版本不匹配的处理：重命名旧库、建新库、不阻塞启动
-- [ ] 3.6 实现 DB 文件独占：第二进程拿不到写权限时交由单实例机制处理
-- [ ] 3.7 验证：删除 local.db 后启动自动重建；手动破坏文件内容后启动仍能进入可用状态
+- [x] 3.1 加 `rusqlite`（bundled）依赖
+- [x] 3.2 新建 `db.rs`：连接打开、WAL 模式、`PRAGMA integrity_check`
+- [x] 3.3 建 schema：`write_queue`、`reminders`、`occurrences`、`stickies`、`todos`、`app_state` + 索引 + 版本记录
+- [x] 3.4 实现迁移框架（读 schema 版本，按需升级；失败按损坏处理而非 panic）
+- [x] 3.5 实现损坏与版本不匹配的处理：重命名旧库、建新库、不阻塞启动
+- [x] 3.6 实现 DB 文件独占：`BEGIN IMMEDIATE` 探测写锁；**被占用时绝不重建**（会毁掉对方的库），只报错降级
+- [x] 3.7 验证：4 个单元测试覆盖首次建库、重开保数据、损坏重建、未来版本重建
 
 ## 4. FileWriteActor 核心
 

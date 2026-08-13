@@ -7,6 +7,7 @@
 //! 已落地的架构决策：D22（窗口预热）、D23（单实例）、FR-13（托盘常驻）、FR-21（热键失败提示）。
 
 mod config;
+mod db;
 mod vault;
 mod window;
 
@@ -188,18 +189,26 @@ pub fn run() {
 
             // vault 解析：路径失效时进入 degraded 状态而非静默重建目录。
             let cfg = Config::load();
-            let status = cfg.vault_status();
-            match &status {
-                VaultStatus::Ready(p) => {
-                    vault::init(p)?;
-                    println!("[vault] {}", p.display());
+            let mut status = cfg.vault_status();
+            if let VaultStatus::Ready(p) = &status {
+                let path = p.clone();
+                vault::init(&path)?;
+                println!("[vault] {}", path.display());
+
+                // 数据库跟着 vault 走。打不开时降级为不可用，而不是让后续
+                // 每次写入都失败——用户至少要知道为什么用不了。
+                match db::open(&vault::db_path(&path)) {
+                    Ok(conn) => {
+                        app.manage(db::Handle::new(conn));
+                    }
+                    Err(e) => {
+                        eprintln!("[db] 打开失败: {e}");
+                        status = VaultStatus::NotWritable(path);
+                    }
                 }
-                other => {
-                    println!(
-                        "[vault] 不可用（{}），进入 degraded 状态",
-                        other.reason().unwrap_or_default()
-                    );
-                }
+            }
+            if let Some(reason) = status.reason() {
+                println!("[vault] 不可用（{reason}），进入 degraded 状态");
             }
             app.manage(VaultState(Mutex::new(status)));
 
