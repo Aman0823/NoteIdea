@@ -52,8 +52,8 @@ npm run app     # = tauri dev，首次会编译 Rust 依赖，需要几分钟
 
 ## 怎么测那个 200ms
 
-1. 应用启动后主窗口会自己打开，说明怎么测。
-2. 按 <kbd>Alt</kbd>+<kbd>Space</kbd> 唤出速记条，敲字后 <kbd>Enter</kbd> 存入 `vault/inbox.md`，或 <kbd>Esc</kbd> 取消。
+1. 应用启动后主窗口会自己打开，说明怎么测。首次启动要先选一个笔记存放文件夹（vault），没选之前速记功能不可用但会明确提示。
+2. 按 <kbd>Alt</kbd>+<kbd>Space</kbd> 唤出速记条，敲字后 <kbd>Enter</kbd> 存入 vault 的 `inbox.md`，或 <kbd>Esc</kbd> 取消。
 3. **反复唤出十几次**。第一次通常最慢（各种懒加载），之后才是稳态，看 p95 而不是看首次。
 4. 回主窗口点「刷新测量结果」，看 p95 是否 ≤ 200ms。
 5. 终端里也会实时打印每次的 `[latency] #n 热键→可输入 X ms`。
@@ -71,19 +71,27 @@ npm run app     # = tauri dev，首次会编译 Rust 依赖，需要几分钟
 ## 目录结构
 
 ```
-src/            前端：main.ts（测量看板）/ quick.ts（速记条）/ styles.css
+src/            前端：main.ts（测量看板 + 写入失败列表）/ quick.ts（速记条）/ styles.css
 index.html      主窗口
 quick.html      速记条（预热窗口）
-src-tauri/      Rust：lib.rs 是全部逻辑，main.rs 只是入口
+src-tauri/      Rust：lib.rs 只做装配，逻辑在 window/config/vault/db/actor
 scripts/        gen-icons.mjs 纯 Node 生成图标，无第三方依赖
 vault/          运行期数据，不进 git
+openspec/       spec 驱动开发的变更提案与任务清单
 ```
+
+## 已经做完的地基
+
+- **单写者 actor（3.9 / D17）**：所有写入走 `ChangeSet` 入队，actor 独占落盘。同目录临时文件 + fsync + rename 原子写。
+- **行级冲突判定（3.10）**：blake3 基线哈希，哈希不匹配时按内容重定位目标行；匹配到多行则拒绝，绝不猜测。
+- **队列持久化与崩溃恢复**：队列进 SQLite，启动先排空遗留记录。append 是唯一不幂等的操作，靠「先记已尝试、再动文件」加末尾比对避免重放出重复行。
+- **失败可见**：重试三次仍失败的写入保留内容并在主窗口列出，可手动重试或丢弃，绝不静默丢弃。
+- **SQLite 本地状态库**：WAL + `integrity_check`；损坏或版本不匹配则重建，但被其他进程占用时只报错降级（重建会毁掉对方的库）。
 
 ## 明确还没做的
 
 骨架期刻意留白，避免在没验证性能前堆代码：
 
-- **3.9 的单写者 actor**：`capture` 现在直接写文件。正式实现必须全部走 actor + ChangeSet，这是第一期真正的地基。
-- 编辑器（CM6 + decoration）、行内语法解析、SQLite、提醒引擎、便签窗口、git 集成——全部未开始。
+- 编辑器（CM6 + decoration）、行内语法解析、提醒引擎、便签窗口、git 集成——全部未开始。
+- `replace_line` / `create` / 整文件替换的核心逻辑与测试已就位，但还没暴露成 command——眼下没有调用方。
 - `capture` 无条件加 `- [ ]` 前缀，正式版应由 3.2 的语法解析决定。
-- vault 路径硬编码，正式版由用户选择并存 config.json（FR-1）。
