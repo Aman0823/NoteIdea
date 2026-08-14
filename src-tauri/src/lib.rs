@@ -110,6 +110,51 @@ fn list_tags(db: State<'_, db::Handle>) -> Result<Vec<(String, u32)>, String> {
     todo::index::list_tags(&db)
 }
 
+/// 为待办分配唯一 ID（D7：4-8 位十六进制，全库查重）
+#[tauri::command]
+fn allocate_todo_id(db: State<'_, db::Handle>) -> Result<String, String> {
+    todo::identity::generate_id(|id| {
+        todo::identity::id_exists(&db, id).unwrap_or(false)
+    })
+    .ok_or_else(|| "ID 分配失败：所有长度都已穷尽".into())
+}
+
+/// 将分配的 ID 写回 md 文件（D6：写盘失败则整个操作失败）
+#[tauri::command]
+async fn write_todo_id(
+    file_path: String,
+    line_number: usize,
+    old_content: String,
+    todo_id: String,
+    vault: State<'_, VaultState>,
+    actor: State<'_, actor::Handle>,
+) -> Result<(), String> {
+    {
+        let status = vault.0.lock().map_err(|_| "vault 状态锁失败")?;
+        if let Some(reason) = status.reason() {
+            return Err(reason);
+        }
+    }
+
+    let new_content = todo::syntax::write_marker_to_line(
+        &old_content,
+        &todo::syntax::MarkerValue::Id(todo_id),
+    );
+
+    actor
+        .enqueue(actor::ChangeSet {
+            file_path,
+            op: actor::Operation::ReplaceLine {
+                line_number,
+                old_content,
+                new_content,
+            },
+            base_hash: None, // D8：路径+行号+内容三重校验，已经够了
+        })
+        .await
+        .map(|_| ())
+}
+
 /// 用户选定 vault 目录后调用：初始化结构、存配置、更新运行期状态。
 #[tauri::command]
 fn choose_vault(
@@ -240,7 +285,9 @@ pub fn run() {
             retry_write,
             discard_write,
             parse_todo_line,
-            list_tags
+            list_tags,
+            allocate_todo_id,
+            write_todo_id
         ])
         .setup(|app| {
             let handle = app.handle().clone();
