@@ -9,6 +9,7 @@
 mod actor;
 mod config;
 mod db;
+mod todo;
 mod vault;
 mod window;
 
@@ -111,7 +112,11 @@ fn choose_vault(
 
     vault::init(&dir)?;
 
-    let cfg = Config { vault_path: Some(dir.clone()), version: 1 };
+    let cfg = Config {
+        vault_path: Some(dir.clone()),
+        version: 1,
+        default_reminder_time: "09:00".to_string(),
+    };
     cfg.save()?;
 
     let status = cfg.vault_status();

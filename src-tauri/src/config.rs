@@ -21,15 +21,26 @@ pub struct Config {
     pub vault_path: Option<PathBuf>,
     #[serde(default = "default_version")]
     pub version: u32,
+    /// 默认提醒时间（HH:MM 格式），用于只指定日期时补全。缺失或非法时回落 09:00。
+    #[serde(default = "default_reminder_time")]
+    pub default_reminder_time: String,
 }
 
 fn default_version() -> u32 {
     CURRENT_VERSION
 }
 
+fn default_reminder_time() -> String {
+    "09:00".to_string()
+}
+
 impl Default for Config {
     fn default() -> Self {
-        Self { vault_path: None, version: CURRENT_VERSION }
+        Self {
+            vault_path: None,
+            version: CURRENT_VERSION,
+            default_reminder_time: default_reminder_time(),
+        }
     }
 }
 
@@ -130,6 +141,20 @@ impl Config {
         } else {
             VaultStatus::NotWritable(path.clone())
         }
+    }
+
+    /// 解析默认提醒时间为 (小时, 分钟)，非法时回落 (9, 0)
+    pub fn parse_default_reminder_time(&self) -> (u32, u32) {
+        let parts: Vec<&str> = self.default_reminder_time.split(':').collect();
+        if parts.len() != 2 {
+            return (9, 0);
+        }
+        let Ok(hour) = parts[0].parse::<u32>() else { return (9, 0) };
+        let Ok(minute) = parts[1].parse::<u32>() else { return (9, 0) };
+        if hour > 23 || minute > 59 {
+            return (9, 0);
+        }
+        (hour, minute)
     }
 }
 
