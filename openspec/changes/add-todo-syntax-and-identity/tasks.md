@@ -77,8 +77,8 @@
 
 ## 9. 收尾
 
-- [ ] 9.1 `cargo clippy` 无警告，`cargo test` 全绿
-- [ ] 9.2 `npm run build` 与 `cargo build` 均通过
+- [x] 9.1 `cargo clippy` 无警告，`cargo test` 全绿
+- [x] 9.2 `npm run build` 与 `cargo build` 均通过
 - [ ] 9.3 手动回归：在 VS Code 里手写各种畸形待办行，确认应用不崩、不改文件、警告位置正确
 - [ ] 9.4 手动回归：`git diff` 确认分配 ID 后只有目标行变化
-- [ ] 9.5 更新 README 的已完成与未完成两节
+- [x] 9.5 更新 README 的已完成与未完成两节
