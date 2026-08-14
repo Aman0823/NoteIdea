@@ -196,7 +196,6 @@ button:hover {
 /* ---------- 速记条 ---------- */
 body.quick {
   background: transparent;
-  overflow: hidden;
 }
 
 .bar {
@@ -223,6 +222,33 @@ body.quick {
 
 .bar input::placeholder {
   color: #6f6885;
+}
+
+.marker-btn {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--accent);
+  font-size: 16px;
+  font-weight: 600;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.marker-btn:hover {
+  background: var(--border);
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+
+.marker-btn:active {
+  transform: translateY(0);
 }
 
 .latency {

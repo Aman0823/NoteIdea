@@ -11,6 +11,7 @@ export default defineConfig({
       input: {
         main: fileURLToPath(new URL('./index.html', import.meta.url)),
         quick: fileURLToPath(new URL('./quick.html', import.meta.url)),
+        'time-picker': fileURLToPath(new URL('./time-picker.html', import.meta.url)),
       },
     },
   },

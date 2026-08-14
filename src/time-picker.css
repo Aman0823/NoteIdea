@@ -1,0 +1,184 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: 'Microsoft YaHei UI', sans-serif;
+  background: #0F172A;
+  color: #F8FAFC;
+  overflow: hidden;
+  user-select: none;
+}
+
+.view {
+  width: 100%;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.view.hidden {
+  display: none;
+}
+
+/* 日期选择视图 */
+#date-view .list {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.item {
+  padding: 16px 20px;
+  border-bottom: 1px solid #1E293B;
+  cursor: pointer;
+  transition: background 0.15s;
+  font-size: 15px;
+}
+
+.item:hover {
+  background: #1E293B;
+}
+
+.item:active {
+  background: #334155;
+}
+
+/* 时间选择视图 */
+.header {
+  padding: 12px 16px;
+  border-bottom: 1px solid #1E293B;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+#back-btn {
+  background: transparent;
+  border: none;
+  color: #38BDF8;
+  font-size: 14px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+  transition: background 0.15s;
+}
+
+#back-btn:hover {
+  background: #1E293B;
+}
+
+#date-label {
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.time-inputs {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 40px 20px;
+}
+
+.input-group {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.input-group label {
+  font-size: 13px;
+  color: #94A3B8;
+}
+
+.spinner-btn {
+  width: 80px;
+  height: 32px;
+  background: #1E293B;
+  border: 1px solid #334155;
+  color: #F8FAFC;
+  font-size: 18px;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: all 0.15s;
+  line-height: 1;
+}
+
+.spinner-btn:hover {
+  background: #334155;
+  border-color: #38BDF8;
+}
+
+.spinner-btn:active {
+  background: #475569;
+}
+
+.input-group input {
+  width: 80px;
+  height: 48px;
+  background: #0B0E14;
+  border: 2px solid #334155;
+  color: #F8FAFC;
+  font-size: 28px;
+  text-align: center;
+  border-radius: 6px;
+  outline: none;
+  transition: border-color 0.15s;
+  font-weight: 500;
+}
+
+.input-group input:focus {
+  border-color: #38BDF8;
+}
+
+.colon {
+  font-size: 32px;
+  font-weight: 300;
+  color: #64748B;
+  margin-top: 24px;
+}
+
+.confirm {
+  margin: 20px;
+  padding: 14px;
+  background: #38BDF8;
+  color: #0F172A;
+  border: none;
+  border-radius: 6px;
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.confirm:hover {
+  background: #22D3EE;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(56, 189, 248, 0.3);
+}
+
+.confirm:active {
+  transform: translateY(0);
+}
+
+/* 滚动条样式 */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0B0E14;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}

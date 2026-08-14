@@ -109,6 +109,50 @@ pub fn quick_warmed() {
     println!("[quick] 预热完成，WebView 已就绪");
 }
 
+/// 调整速记条窗口高度（输入辅助弹层需要撑开窗口才能显示）
+#[tauri::command]
+pub fn resize_quick(app: AppHandle, height: f64) {
+    if let Some(win) = app.get_webview_window(QUICK) {
+        if let Err(e) = win.set_size(tauri::LogicalSize::new(620.0, height)) {
+            eprintln!("[quick] 调整高度失败: {e}");
+        }
+    }
+}
+
+/// 打开时间选择器窗口（独立窗口，无边框，始终置顶）
+#[tauri::command]
+pub async fn open_time_picker(app: AppHandle) {
+    println!("[time-picker] open_time_picker 被调用");
+
+    // 如果已存在则显示并聚焦
+    if let Some(win) = app.get_webview_window("time-picker") {
+        println!("[time-picker] 窗口已存在，显示并聚焦");
+        let _ = win.show();
+        let _ = win.set_focus();
+        return;
+    }
+
+    println!("[time-picker] 开始创建窗口");
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    let builder = WebviewWindowBuilder::new(&app, "time-picker", WebviewUrl::App("time-picker.html".into()))
+        .title("选择提醒时间")
+        .inner_size(260.0, 420.0)
+        .resizable(false)
+        .decorations(true)
+        .always_on_top(true)
+        .visible(false);
+
+    match builder.build() {
+        Ok(win) => {
+            println!("[time-picker] 窗口创建成功，居中并显示");
+            let _ = win.center();
+            let _ = win.show();
+        }
+        Err(e) => eprintln!("[time-picker] 创建窗口失败: {e}"),
+    }
+}
+
 #[tauri::command]
 pub fn hotkey_failures(state: State<'_, HotkeyFailures>) -> Vec<String> {
     state.0.clone()

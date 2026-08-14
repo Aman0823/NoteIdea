@@ -53,10 +53,14 @@ export function show(
   currentLayer = document.createElement('div')
   currentLayer.className = 'assist-layer'
   currentLayer.style.left = `${anchorX}px`
-  currentLayer.style.top = `${anchorY + 4}px` // 锚点下方 4px
+  currentLayer.style.top = `${anchorY + 12}px` // 锚点下方 12px，避免盖住输入内容
 
   renderItems()
   document.body.appendChild(currentLayer)
+
+  // 撑开窗口（弹层需要额外高度）
+  const layerHeight = Math.min(items.length * 32 + 16, 200) // 每项 32px + 上下 padding，最高 200
+  invoke('resize_quick', { height: 60 + layerHeight + 8 })
 
   // 键盘事件
   document.addEventListener('keydown', handleKeyDown)
@@ -71,6 +75,9 @@ export function hide(): void {
     onConfirm = null
     items = []
     document.removeEventListener('keydown', handleKeyDown)
+
+    // 恢复窗口高度
+    invoke('resize_quick', { height: 60 })
   }
 }
 
@@ -153,8 +160,9 @@ function handleKeyDown(e: KeyboardEvent): void {
 function confirmItem(index: number): void {
   if (!onConfirm || index < 0 || index >= items.length) return
   const value = items[index].value
+  const callback = onConfirm  // 保存回调
   hide()
-  onConfirm(value)
+  callback(value)  // hide 之后调用
 }
 
 // 构建时间候选项
@@ -162,27 +170,35 @@ function buildTimeItems(filter: string): AssistItem[] {
   const now = new Date()
   const result: AssistItem[] = []
 
-  // 今天 18:00
-  const today1800 = `@${formatDate(now)} 18:00`
-  if (matches(today1800, filter)) {
-    result.push({ label: '今天 18:00', value: today1800 })
+  // 今天的几个时间点
+  const todayTimes = ['09:00', '12:00', '14:00', '18:00', '20:00', '22:00']
+  for (const time of todayTimes) {
+    const value = `@${formatDate(now)} ${time}`
+    if (matches(value, filter)) {
+      result.push({ label: `今天 ${time}`, value })
+    }
   }
 
-  // 今天 20:00
-  const today2000 = `@${formatDate(now)} 20:00`
-  if (matches(today2000, filter)) {
-    result.push({ label: '今天 20:00', value: today2000 })
-  }
-
-  // 明天 09:00
+  // 明天的几个时间点
   const tomorrow = new Date(now)
   tomorrow.setDate(tomorrow.getDate() + 1)
-  const tomorrow0900 = `@${formatDate(tomorrow)} 09:00`
-  if (matches(tomorrow0900, filter)) {
-    result.push({ label: '明天 09:00', value: tomorrow0900 })
+  const tomorrowTimes = ['09:00', '12:00', '18:00', '20:00']
+  for (const time of tomorrowTimes) {
+    const value = `@${formatDate(tomorrow)} ${time}`
+    if (matches(value, filter)) {
+      result.push({ label: `明天 ${time}`, value })
+    }
   }
 
-  // 本周五 18:00
+  // 后天 09:00
+  const dayAfter = new Date(now)
+  dayAfter.setDate(dayAfter.getDate() + 2)
+  const dayAfter0900 = `@${formatDate(dayAfter)} 09:00`
+  if (matches(dayAfter0900, filter)) {
+    result.push({ label: '后天 09:00', value: dayAfter0900 })
+  }
+
+  // 本周五 18:00（如果今天不是周五或之后）
   const friday = getNextWeekday(now, 5)
   if (friday) {
     const friday1800 = `@${formatDate(friday)} 18:00`
@@ -196,6 +212,13 @@ function buildTimeItems(filter: string): AssistItem[] {
   const nextMonday0900 = `@${formatDate(nextMonday)} 09:00`
   if (matches(nextMonday0900, filter)) {
     result.push({ label: '下周一 09:00', value: nextMonday0900 })
+  }
+
+  // 下周五 18:00
+  const nextFriday = getNextWeekday(now, 5, true)
+  const nextFriday1800 = `@${formatDate(nextFriday)} 18:00`
+  if (matches(nextFriday1800, filter)) {
+    result.push({ label: '下周五 18:00', value: nextFriday1800 })
   }
 
   return result

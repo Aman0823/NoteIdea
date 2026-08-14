@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>选择提醒时间</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+    <style>
+      body.time-picker {
+        margin: 0;
+        padding: 16px;
+        background: var(--bg);
+        color: var(--text);
+        overflow: hidden;
+      }
+
+      .picker-container {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+        gap: 12px;
+      }
+
+      /* 日期类型列表（第一级） */
+      .date-list {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      .date-item {
+        padding: 10px 14px;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        cursor: pointer;
+        transition: all 0.15s;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+
+      .date-item:hover {
+        background: var(--border);
+        border-color: var(--accent);
+      }
+
+      .date-item::after {
+        content: '›';
+        color: var(--muted);
+        font-size: 18px;
+      }
+
+      /* 时间输入界面（第二级） */
+      .time-input {
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+
+      .back-btn {
+        padding: 8px 12px;
+        background: transparent;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        color: var(--text);
+        cursor: pointer;
+        transition: all 0.15s;
+        text-align: left;
+        font-size: 14px;
+      }
+
+      .back-btn:hover {
+        background: var(--border);
+      }
+
+      .back-btn::before {
+        content: '‹ ';
+        font-size: 18px;
+      }
+
+      .time-controls {
+        display: flex;
+        gap: 20px;
+        justify-content: center;
+        align-items: center;
+        padding: 20px 0;
+      }
+
+      .time-col {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .time-label {
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .time-value {
+        width: 64px;
+        height: 48px;
+        background: var(--panel);
+        border: 2px solid var(--border);
+        border-radius: 8px;
+        color: var(--text);
+        font-size: 24px;
+        font-weight: 600;
+        text-align: center;
+        outline: none;
+        transition: border-color 0.15s;
+      }
+
+      .time-value:focus {
+        border-color: var(--accent);
+      }
+
+      .time-spinners {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      .spin-btn {
+        width: 32px;
+        height: 32px;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        color: var(--text);
+        cursor: pointer;
+        transition: all 0.15s;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 16px;
+        user-select: none;
+      }
+
+      .spin-btn:hover {
+        background: var(--border);
+        border-color: var(--accent);
+      }
+
+      .spin-btn:active {
+        transform: scale(0.95);
+      }
+
+      .confirm-btn {
+        margin-top: auto;
+        padding: 12px;
+        background: var(--accent);
+        border: none;
+        border-radius: 8px;
+        color: var(--bg);
+        font-size: 15px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.15s;
+      }
+
+      .confirm-btn:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 12px rgba(245, 197, 66, 0.3);
+      }
+
+      .hidden {
+        display: none;
+      }
+    </style>
+  </head>
+  <body class="time-picker">
+    <div class="picker-container">
+      <!-- 第一级：日期类型列表 -->
+      <div id="date-list" class="date-list">
+        <div class="date-item" data-type="today">今天</div>
+        <div class="date-item" data-type="tomorrow">明天</div>
+        <div class="date-item" data-type="dayAfter">后天</div>
+        <div class="date-item" data-type="thisFri">本周五</div>
+        <div class="date-item" data-type="nextMon">下周一</div>
+        <div class="date-item" data-type="nextFri">下周五</div>
+        <div class="date-item" data-type="custom">自定义日期</div>
+      </div>
+
+      <!-- 第二级：时间输入 -->
+      <div id="time-input" class="time-input hidden">
+        <button class="back-btn" id="back-btn">返回</button>
+
+        <div class="time-controls">
+          <div class="time-col">
+            <div class="time-label">时</div>
+            <input type="text" class="time-value" id="hour-input" maxlength="2" value="09" />
+            <div class="time-spinners">
+              <button class="spin-btn" data-target="hour" data-dir="1">▲</button>
+              <button class="spin-btn" data-target="hour" data-dir="-1">▼</button>
+            </div>
+          </div>
+
+          <div style="font-size: 32px; color: var(--muted); margin-top: 32px;">:</div>
+
+          <div class="time-col">
+            <div class="time-label">分</div>
+            <input type="text" class="time-value" id="minute-input" maxlength="2" value="00" />
+            <div class="time-spinners">
+              <button class="spin-btn" data-target="minute" data-dir="1">▲</button>
+              <button class="spin-btn" data-target="minute" data-dir="-1">▼</button>
+            </div>
+          </div>
+        </div>
+
+        <button class="confirm-btn" id="confirm-btn">确定</button>
+      </div>
+    </div>
+
+    <script type="module" src="/src/time-picker.ts"></script>
+  </body>
+</html>
