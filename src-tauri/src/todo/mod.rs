@@ -2,4 +2,5 @@
 //!
 //! 对应 spec：todo/syntax, todo/input-assist, todo/identity, todo/index
 
+pub mod index;
 pub mod syntax;

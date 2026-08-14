@@ -651,7 +651,7 @@ fn get_local_offset_seconds() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     // 获取当前 UTC 时间戳
-    let now_utc = SystemTime::now()
+    let _now_utc = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;

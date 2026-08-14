@@ -98,6 +98,18 @@ fn discard_write(id: i64, db: State<'_, db::Handle>) -> Result<(), String> {
     Ok(())
 }
 
+/// 解析待办行（D3：返回完整结构而非 UI 指令）
+#[tauri::command]
+fn parse_todo_line(text: String) -> Option<todo::syntax::TodoLine> {
+    todo::syntax::parse(&text)
+}
+
+/// 查询 vault 内已有标签，按使用频次排序（供 # 弹层）
+#[tauri::command]
+fn list_tags(db: State<'_, db::Handle>) -> Result<Vec<(String, u32)>, String> {
+    todo::index::list_tags(&db)
+}
+
 /// 用户选定 vault 目录后调用：初始化结构、存配置、更新运行期状态。
 #[tauri::command]
 fn choose_vault(
@@ -226,7 +238,9 @@ pub fn run() {
             choose_vault,
             failed_writes,
             retry_write,
-            discard_write
+            discard_write,
+            parse_todo_line,
+            list_tags
         ])
         .setup(|app| {
             let handle = app.handle().clone();
