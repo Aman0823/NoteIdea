@@ -268,7 +268,7 @@ pub fn spawn_scan(
     app: tauri::AppHandle,
     vault_root: std::path::PathBuf,
 ) {
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         // 拿到 db::Handle
         let Some(db) = app.try_state::<db::Handle>() else {
             eprintln!("[index] DB 不可用，跳过扫描");
