@@ -144,6 +144,7 @@ impl Config {
     }
 
     /// 解析默认提醒时间为 (小时, 分钟)，非法时回落 (9, 0)
+    #[allow(dead_code)] // 等提醒引擎接入时使用
     pub fn parse_default_reminder_time(&self) -> (u32, u32) {
         let parts: Vec<&str> = self.default_reminder_time.split(':').collect();
         if parts.len() != 2 {

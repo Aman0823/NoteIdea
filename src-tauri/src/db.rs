@@ -15,7 +15,7 @@ use std::path::Path;
 use rusqlite::Connection;
 
 /// schema 版本。加表或改表结构时递增，并在 `migrate` 里加对应分支。
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// 打开数据库。文件不存在、损坏、版本不匹配一律静默重建，不阻塞启动。
 ///
@@ -141,10 +141,24 @@ fn create_schema(conn: &Connection) -> Result<(), String> {
 /// 迁移失败按损坏处理（由调用方重建），不 panic。
 fn migrate(conn: &Connection, from: i64) -> Result<(), String> {
     println!("[db] 迁移 schema v{from} → v{SCHEMA_VERSION}");
-    // 目前只有 v1，没有历史版本需要迁移。
-    // 将来加版本时在此按 from 逐级 ALTER TABLE。
-    let _ = conn;
-    Err(format!("没有从 v{from} 出发的迁移路径"))
+    match from {
+        1 => {
+            // v1 → v2：todos 表增加 time_expr, recurrence, intensity 三列
+            conn.execute_batch(
+                r#"
+                ALTER TABLE todos ADD COLUMN time_expr TEXT;
+                ALTER TABLE todos ADD COLUMN recurrence TEXT;
+                ALTER TABLE todos ADD COLUMN intensity TEXT;
+                "#,
+            )
+            .map_err(|e| format!("迁移失败: {e}"))?;
+            conn.pragma_update(None, "user_version", 2)
+                .map_err(|e| format!("更新版本号失败: {e}"))?;
+            println!("[db] 迁移完成");
+            Ok(())
+        }
+        _ => Err(format!("没有从 v{from} 出发的迁移路径")),
+    }
 }
 
 /// 共享的数据库连接。
@@ -242,6 +256,9 @@ CREATE TABLE IF NOT EXISTS todos (
     todo_id     TEXT,                      -- 无提醒且未贴屏的待办没有 ID
     text        TEXT    NOT NULL,
     checked     INTEGER NOT NULL DEFAULT 0,
+    time_expr   TEXT,                      -- JSON，未求值的时间表达式（如 {"date":"today","time":[18,0]}）
+    recurrence  TEXT,                      -- once/daily/weekly/...
+    intensity   TEXT,                      -- toast/ring/full
     tags        TEXT,                      -- JSON 数组
     scanned_at  INTEGER NOT NULL,
     PRIMARY KEY (file_path, line_number)

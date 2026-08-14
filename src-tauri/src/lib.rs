@@ -106,7 +106,7 @@ fn parse_todo_line(text: String) -> Option<todo::syntax::TodoLine> {
 
 /// 查询 vault 内已有标签，按使用频次排序（供 # 弹层）
 #[tauri::command]
-fn list_tags(db: State<'_, db::Handle>) -> Result<Vec<(String, u32)>, String> {
+fn list_tags(db: State<'_, db::Handle>) -> Result<Vec<(String, usize)>, String> {
     todo::index::list_tags(&db)
 }
 

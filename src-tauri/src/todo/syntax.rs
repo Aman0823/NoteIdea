@@ -119,6 +119,7 @@ pub struct TodoLine {
 
 impl TodoLine {
     /// 查找包含给定字节偏移的标记
+    #[allow(dead_code)] // 等输入辅助层接入时使用
     pub fn marker_at(&self, offset: usize) -> Option<&Marker> {
         self.markers
             .iter()
@@ -647,6 +648,8 @@ pub fn is_leap(year: u32) -> bool {
 }
 
 /// 获取本地时区偏移（秒），简化实现：假定偏移不随时间变化
+/// 获取本地时区相对 UTC 的秒数偏移（用于时间求值）
+#[allow(dead_code)] // 等提醒引擎接入时使用
 fn get_local_offset_seconds() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -745,6 +748,8 @@ fn ymd_to_days_since_epoch(year: u32, month: u32, day: u32) -> Option<i64> {
 /// - 都有：直接组合
 ///
 /// 返回 `None` 表示求值失败（非法日期如 2 月 30 日）。
+/// 将时间表达式求值为 Unix 时间戳（秒），需要传入当前时刻（D4）
+#[allow(dead_code)] // 等提醒引擎接入时使用
 pub fn evaluate_time(expr: &TimeExpr, now: i64, default_time: (u32, u32)) -> Option<i64> {
     // 将 now 转为本地日期时间（简化：假定本地时区偏移不变）
     let local_offset = get_local_offset_seconds();
@@ -822,6 +827,7 @@ fn add_one_day(year: u32, month: u32, day: u32) -> (u32, u32, u32) {
 
 impl MarkerValue {
     /// 序列化为规范文本形式。默认值（`!once` / `^toast`）省略不写。
+    #[allow(dead_code)] // 等 ID 写回接入时使用
     pub fn serialize(&self) -> String {
         match self {
             Self::Time(expr) => {
@@ -1061,7 +1067,7 @@ mod tests {
     fn multibyte_chars() {
         let line = "- [ ] 中文内容 😊 @2026-08-14";
         let result = parse(line).unwrap();
-        assert!(result.markers.len() > 0);
+        assert!(!result.markers.is_empty());
     }
 
     #[test]
@@ -1148,7 +1154,7 @@ mod tests {
         // 构造「现在是 2026-08-14 18:01」
         let offset = get_local_offset_seconds();
         let days = ymd_to_days_since_epoch(2026, 8, 14).unwrap();
-        let secs_in_day = 18 * 3600 + 1 * 60;
+        let secs_in_day = 18 * 3600 + 60;
         let local_ts = days * 86400 + secs_in_day;
         let now_ts = local_ts - offset;
 
