@@ -120,43 +120,79 @@ input.addEventListener('input', () => {
   }
 });
 
-// 请求解析（带序号，丢弃过期响应）
+// 可弹层的标记种类（~id 由系统分配，不给用户选）
+const ASSISTABLE = new Set(['time', 'repeat', 'tag', 'intensity']);
+
+/**
+ * 请求解析（带序号，丢弃过期响应）。
+ *
+ * 光标处的东西可能落在两个地方：
+ *   - markers：值已合法（`@2026-08-15`），用户可能想改
+ *   - degraded：值还不合法（刚敲下的 `@`、半个标签 `#工`），这才是最常见的
+ *     弹层时机——所以两处都要查，只查 markers 等于永远不弹。
+ *
+ * span 是 UTF-8 字节偏移，JS 字符串是 UTF-16，中文场景下两者不等，
+ * 替换范围必须在字节域里算（见 sliceByBytes）。
+ */
 async function requestParse(text: string, cursor: number): Promise<void> {
   const seq = ++parseSeq;
 
+  let result: TodoLine | null;
   try {
-    const result: TodoLine | null = await invoke('parse_todo_line', { text });
-    if (parseSeq !== seq) return; // 过期响应，丢弃
-
-    if (!result) return; // 不是待办行
-
-    // 找到光标所在的 marker
-    const marker = result.markers.find(m => cursor >= m.span.start && cursor <= m.span.end);
-    if (!marker) return;
-
-    const kind = marker.value.kind;
-    if (kind !== 'time' && kind !== 'repeat' && kind !== 'tag' && kind !== 'intensity') {
-      return; // ~id 不弹层
-    }
-
-    // 计算弹层锚点（输入框左下角）
-    const rect = input.getBoundingClientRect();
-    const anchorX = rect.left;
-    const anchorY = rect.bottom;
-
-    const filter = extractFilter(text, cursor);
-
-    assist.show(kind, anchorX, anchorY, filter, (value) => {
-      // 确认回调：替换当前 marker 为选中的值
-      const before = text.slice(0, marker.span.start);
-      const after = text.slice(marker.span.end);
-      input.value = before + value + after;
-      input.setSelectionRange(before.length + value.length, before.length + value.length);
-      input.focus();
-    });
+    // bare: 速记条输入没有 `- [ ] ` 前缀
+    result = await invoke('parse_todo_line', { text, bare: true });
   } catch (err) {
+    // 解析不可用不能影响打字，静默放弃本次弹层
     console.error('解析失败:', err);
+    return;
   }
+  if (parseSeq !== seq || !result) return; // 过期响应，丢弃
+
+  const cursorByte = utf16ToByte(text, cursor);
+
+  // 先找合法标记，再找降级 token（后者是打字中间态，命中率更高）
+  const hit =
+    result.markers.find(
+      (m) => cursorByte >= m.span.start && cursorByte <= m.span.end
+    ) ??
+    result.degraded.find(
+      (d) => cursorByte >= d.span.start && cursorByte <= d.span.end
+    );
+  if (!hit) return;
+
+  const kind = 'value' in hit ? hit.value.kind : hit.suspected;
+  if (!ASSISTABLE.has(kind)) return;
+
+  const rect = input.getBoundingClientRect();
+  const filter = extractFilter(text, cursor);
+
+  assist.show(
+    kind as 'time' | 'repeat' | 'tag' | 'intensity',
+    rect.left,
+    rect.bottom,
+    filter,
+    (value) => {
+      // 用解析器给的 span 替换，而不是自己找边界——边界规则只有 Rust 知道
+      const before = sliceByBytes(text, 0, hit.span.start);
+      const after = sliceByBytes(text, hit.span.end, null);
+      input.value = before + value + after;
+      const caret = (before + value).length;
+      input.setSelectionRange(caret, caret);
+      input.focus();
+    }
+  );
+}
+
+/** UTF-16 下标 → UTF-8 字节偏移 */
+function utf16ToByte(text: string, idx: number): number {
+  return new TextEncoder().encode(text.slice(0, idx)).length;
+}
+
+/** 按字节偏移切片，返回 JS 字符串 */
+function sliceByBytes(text: string, from: number, to: number | null): string {
+  const bytes = new TextEncoder().encode(text);
+  const part = to === null ? bytes.slice(from) : bytes.slice(from, to);
+  return new TextDecoder().decode(part);
 }
 
 // 提取过滤词：从 marker 起始位置到光标之间的文本（去掉前导标记字符）

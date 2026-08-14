@@ -151,6 +151,26 @@ pub fn parse(line: &str) -> Option<TodoLine> {
     })
 }
 
+/// 解析裸文本片段：不要求 GFM 复选框前缀，其余规则与 `parse` 完全一致。
+///
+/// 速记条里用户敲的是 `买牛奶 @`，没有 `- [ ] ` 前缀；`parse` 会因此返回
+/// None，导致输入辅助永远不触发。将来编辑器里在普通段落敲 `@` 也是同样情形。
+///
+/// 刻意复用 `quoted_ranges` / `tokenize` / `scan_metadata`——语法规则仍是
+/// 唯一一份（D1），这里只是换了个入口。`checked` 恒为 false（没有复选框）。
+pub fn parse_fragment(text: &str) -> TodoLine {
+    let quoted = quoted_ranges(text);
+    let tokens = tokenize(text, 0, &quoted);
+    let (markers, degraded, content_end) = scan_metadata(text, &tokens, &quoted);
+
+    TodoLine {
+        checked: false,
+        content: Span { start: 0, end: content_end },
+        markers,
+        degraded,
+    }
+}
+
 /// 识别 GFM 待办前缀，返回 (是否勾选, 正文起始位置)
 fn todo_prefix(line: &str) -> Option<(bool, usize)> {
     let trimmed = line.trim_start();
@@ -1326,5 +1346,69 @@ mod tests {
         // 应该能再次解析
         let reparsed = parse(&rebuilt).unwrap();
         assert_eq!(reparsed.markers.len(), todo.markers.len());
+    }
+}
+
+#[cfg(test)]
+mod fragment_tests {
+    use super::*;
+
+    #[test]
+    fn bare_text_without_prefix_is_parsed() {
+        // 速记条的真实输入形态：没有 GFM 前缀
+        let t = parse_fragment("买牛奶 @2026-08-15");
+        assert_eq!(t.markers.len(), 1, "无前缀也要认出标记");
+        assert!(matches!(t.markers[0].value, MarkerValue::Time(_)));
+        assert_eq!(&"买牛奶 @2026-08-15"[t.content.start..t.content.end], "买牛奶 ");
+    }
+
+    #[test]
+    fn lone_trigger_char_lands_in_degraded() {
+        // 刚敲下 @ 时值还是空的，必然非法。这一步要能被前端识别为
+        // 「用户正在此处输入时间」，否则弹层永远不会出现。
+        let t = parse_fragment("买牛奶 @");
+        assert!(t.markers.is_empty());
+        assert_eq!(t.degraded.len(), 1);
+        assert_eq!(t.degraded[0].suspected, MarkerKind::Time);
+        assert_eq!(t.degraded[0].span.start, 10, "span 要指向 @ 本身");
+        assert_eq!(t.degraded[0].span.end, 11);
+    }
+
+    #[test]
+    fn each_trigger_char_reports_its_kind() {
+        for (text, want) in [
+            ("x @", MarkerKind::Time),
+            ("x !", MarkerKind::Repeat),
+            ("x #", MarkerKind::Tag),
+            ("x ^", MarkerKind::Intensity),
+        ] {
+            let t = parse_fragment(text);
+            assert_eq!(t.degraded.len(), 1, "{text}");
+            assert_eq!(t.degraded[0].suspected, want, "{text}");
+        }
+    }
+
+    #[test]
+    fn plain_text_yields_nothing() {
+        let t = parse_fragment("买牛奶");
+        assert!(t.markers.is_empty());
+        assert!(t.degraded.is_empty(), "纯文本不该产生任何警告");
+    }
+
+    #[test]
+    fn fragment_and_parse_agree_on_markers() {
+        // 同一段元数据，带前缀和不带前缀应识别出相同的标记
+        let bare = parse_fragment("交周报 @2026-08-14 18:00 !weekly #工作");
+        let full = parse("- [ ] 交周报 @2026-08-14 18:00 !weekly #工作").unwrap();
+
+        let kinds = |t: &TodoLine| t.markers.iter().map(|m| m.value.kind()).collect::<Vec<_>>();
+        assert_eq!(kinds(&bare), kinds(&full));
+    }
+
+    #[test]
+    fn email_not_mistaken_in_fragment() {
+        let t = parse_fragment("联系 zhang@corp.com");
+        assert!(t.markers.is_empty(), "正文里的 @ 不该被当成标记");
+        assert!(t.degraded.is_empty());
     }
 }

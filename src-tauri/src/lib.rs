@@ -99,9 +99,16 @@ fn discard_write(id: i64, db: State<'_, db::Handle>) -> Result<(), String> {
 }
 
 /// 解析待办行（D3：返回完整结构而非 UI 指令）
+///
+/// `bare = true` 时走 `parse_fragment`，不要求 GFM 复选框前缀——速记条里
+/// 用户敲的是裸文本，用 `parse` 会一律得到 null，弹层永远不触发。
 #[tauri::command]
-fn parse_todo_line(text: String) -> Option<todo::syntax::TodoLine> {
-    todo::syntax::parse(&text)
+fn parse_todo_line(text: String, bare: Option<bool>) -> Option<todo::syntax::TodoLine> {
+    if bare.unwrap_or(false) {
+        Some(todo::syntax::parse_fragment(&text))
+    } else {
+        todo::syntax::parse(&text)
+    }
 }
 
 /// 查询 vault 内已有标签，按使用频次排序（供 # 弹层）
