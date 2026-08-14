@@ -1,7 +1,6 @@
-//! 待办行解析、时间求值、身份分配与索引（D1–D10）
+//! 待办行的语法解析、身份分配、索引管理（D1-D10）
 //!
-//! 对应 spec：todo/syntax, todo/input-assist, todo/identity, todo/index
+//! 对应 spec：todo/syntax, todo/identity, todo/index
 
-pub mod identity;
-pub mod index;
 pub mod syntax;
+pub mod index;

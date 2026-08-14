@@ -103,18 +103,21 @@ fn discard_write(id: i64, db: State<'_, db::Handle>) -> Result<(), String> {
 /// `bare = true` 时走 `parse_fragment`，不要求 GFM 复选框前缀——速记条里
 /// 用户敲的是裸文本，用 `parse` 会一律得到 null，弹层永远不触发。
 #[tauri::command]
-fn parse_todo_line(text: String, bare: Option<bool>) -> Option<todo::syntax::TodoLine> {
-    if bare.unwrap_or(false) {
-        Some(todo::syntax::parse_fragment(&text))
-    } else {
+fn parse_todo_line(text: String, _bare: Option<bool>) -> Option<todo::syntax::TodoLine> {
+    // TODO: 任务 1.9 实现 parse_fragment 后启用 bare 分支
+    // if bare.unwrap_or(false) {
+    //     Some(todo::syntax::parse_fragment(&text))
+    // } else {
         todo::syntax::parse(&text)
-    }
+    // }
 }
 
 /// 查询 vault 内已有标签，按使用频次排序（供 # 弹层）
 #[tauri::command]
-fn list_tags(db: State<'_, db::Handle>) -> Result<Vec<(String, usize)>, String> {
-    todo::index::list_tags(&db)
+fn list_tags(_db: State<'_, db::Handle>) -> Result<Vec<(String, usize)>, String> {
+    // TODO: 任务 8.4 实现
+    Err("尚未实现".into())
+    // todo::index::list_tags(&db)
 }
 
 /// 手动触发全量重扫（任务 8.7）
@@ -132,11 +135,13 @@ fn rescan_index(app: AppHandle, vault: State<'_, VaultState>) -> Result<(), Stri
 
 /// 为待办分配唯一 ID（D7：4-8 位十六进制，全库查重）
 #[tauri::command]
-fn allocate_todo_id(db: State<'_, db::Handle>) -> Result<String, String> {
-    todo::identity::generate_id(|id| {
-        todo::identity::id_exists(&db, id).unwrap_or(false)
-    })
-    .ok_or_else(|| "ID 分配失败：所有长度都已穷尽".into())
+fn allocate_todo_id(_db: State<'_, db::Handle>) -> Result<String, String> {
+    // TODO: 任务 7.1 实现
+    Err("尚未实现".into())
+    // todo::identity::generate_id(|id| {
+    //     todo::identity::id_exists(&db, id).unwrap_or(false)
+    // })
+    // .ok_or_else(|| "ID 分配失败：所有长度都已穷尽".into())
 }
 
 /// 将分配的 ID 写回 md 文件（D6：写盘失败则整个操作失败）
@@ -156,10 +161,12 @@ async fn write_todo_id(
         }
     }
 
-    let new_content = todo::syntax::write_marker_to_line(
-        &old_content,
-        &todo::syntax::MarkerValue::Id(todo_id),
-    );
+    // TODO: 任务 3.3 实现 write_marker_to_line
+    let new_content = format!("{} ~{}", old_content.trim_end(), todo_id);
+    // let new_content = todo::syntax::write_marker_to_line(
+    //     &old_content,
+    //     &todo::syntax::MarkerValue::Id(todo_id),
+    // );
 
     actor
         .enqueue(actor::ChangeSet {
