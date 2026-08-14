@@ -110,6 +110,19 @@ fn list_tags(db: State<'_, db::Handle>) -> Result<Vec<(String, usize)>, String> 
     todo::index::list_tags(&db)
 }
 
+/// 手动触发全量重扫（任务 8.7）
+#[tauri::command]
+fn rescan_index(app: AppHandle, vault: State<'_, VaultState>) -> Result<(), String> {
+    let status = vault.0.lock().map_err(|_| "vault 状态锁失败")?;
+
+    if let config::VaultStatus::Ready(path) = &*status {
+        todo::index::spawn_scan(app, path.clone());
+        Ok(())
+    } else {
+        Err("vault 不可用".into())
+    }
+}
+
 /// 为待办分配唯一 ID（D7：4-8 位十六进制，全库查重）
 #[tauri::command]
 fn allocate_todo_id(db: State<'_, db::Handle>) -> Result<String, String> {
@@ -286,6 +299,7 @@ pub fn run() {
             discard_write,
             parse_todo_line,
             list_tags,
+            rescan_index,
             allocate_todo_id,
             write_todo_id
         ])
@@ -307,6 +321,9 @@ pub fn run() {
                         app.manage(db::Handle::new(conn));
                         // actor 必须在 DB 就绪后启动：它启动时就会去排空遗留队列。
                         app.manage(actor::spawn(handle.clone(), path.clone()));
+
+                        // 任务 8.5：在后台启动全量索引扫描，不阻塞窗口显示
+                        todo::index::spawn_scan(handle.clone(), path.clone());
                     }
                     Err(e) => {
                         eprintln!("[db] 打开失败: {e}");

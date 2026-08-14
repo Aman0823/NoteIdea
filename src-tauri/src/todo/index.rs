@@ -9,6 +9,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use tauri::{Emitter, Manager};
 
 use crate::db;
 use crate::todo::syntax;
@@ -242,6 +243,74 @@ fn parse_todos(lines: &[&str]) -> Vec<TodoItem> {
     result
 }
 
+/// 索引扫描状态
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ScanStatus {
+    /// 正在扫描
+    Scanning { scanned: usize, total: usize },
+    /// 扫描完成
+    Ready { result: ScanSummary },
+    /// 扫描失败
+    Failed { error: String },
+}
+
+/// 扫描结果摘要（不含完整的 skipped_files 列表）
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ScanSummary {
+    pub scanned: usize,
+    pub todos_found: usize,
+    pub skipped_count: usize,
+}
+
+/// 在后台启动全量扫描，不阻塞调用方
+pub fn spawn_scan(
+    app: tauri::AppHandle,
+    vault_root: std::path::PathBuf,
+) {
+    tokio::spawn(async move {
+        // 拿到 db::Handle
+        let Some(db) = app.try_state::<db::Handle>() else {
+            eprintln!("[index] DB 不可用，跳过扫描");
+            let _ = app.emit("index:status", ScanStatus::Failed {
+                error: "数据库不可用".into(),
+            });
+            return;
+        };
+
+        println!("[index] 开始后台全量扫描");
+        let _ = app.emit("index:status", ScanStatus::Scanning { scanned: 0, total: 0 });
+
+        match scan_vault(&vault_root, &db) {
+            Ok(result) => {
+                println!(
+                    "[index] 扫描完成：{} 个文件，{} 条待办，{} 个文件失败",
+                    result.scanned, result.todos_found, result.skipped_files.len()
+                );
+
+                if !result.skipped_files.is_empty() {
+                    eprintln!("[index] 失败的文件：");
+                    for (path, reason) in &result.skipped_files {
+                        eprintln!("  - {}: {}", path.display(), reason);
+                    }
+                }
+
+                let _ = app.emit("index:status", ScanStatus::Ready {
+                    result: ScanSummary {
+                        scanned: result.scanned,
+                        todos_found: result.todos_found,
+                        skipped_count: result.skipped_files.len(),
+                    },
+                });
+            }
+            Err(e) => {
+                eprintln!("[index] 扫描失败: {e}");
+                let _ = app.emit("index:status", ScanStatus::Failed { error: e });
+            }
+        }
+    });
+}
+
 /// 列出所有已使用的标签及其出现次数，按频次降序
 pub fn list_tags(db: &db::Handle) -> Result<Vec<(String, usize)>, String> {
     db.with(|conn| {
@@ -334,5 +403,100 @@ mod tests {
             conn.query_row("SELECT COUNT(*) FROM todos", [], |r| r.get(0))
         }).unwrap();
         assert_eq!(count, 2);
+    }
+
+    // 任务 8.8：删库重扫结果与首次扫描一致
+    #[test]
+    fn rescan_after_drop_matches_initial() {
+        let temp = TempDir::new().unwrap();
+        let vault_root = temp.path();
+
+        fs::write(vault_root.join("test.md"), "- [ ] 任务A\n- [x] 任务B ~abcd\n").unwrap();
+
+        let db_path = vault_root.join(".noteidea").join("test.db");
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let conn = crate::db::open(&db_path).unwrap();
+        let db = crate::db::Handle::new(conn);
+
+        // 首次扫描
+        let result1 = scan_vault(vault_root, &db).unwrap();
+
+        // 获取首次扫描的内容快照
+        let snapshot1: Vec<(String, i64, Option<String>, String, i64)> = db.with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT file_path, line_number, todo_id, text, checked FROM todos ORDER BY file_path, line_number"
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()
+        }).unwrap();
+
+        // 删库（清空 todos 表）
+        db.with(|conn| {
+            conn.execute("DELETE FROM todos", [])?;
+            Ok(())
+        }).unwrap();
+
+        // 重扫
+        let result2 = scan_vault(vault_root, &db).unwrap();
+
+        // 获取重扫后的内容快照
+        let snapshot2: Vec<(String, i64, Option<String>, String, i64)> = db.with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT file_path, line_number, todo_id, text, checked FROM todos ORDER BY file_path, line_number"
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()
+        }).unwrap();
+
+        // 两次扫描的统计结果应该一致
+        assert_eq!(result1.scanned, result2.scanned);
+        assert_eq!(result1.todos_found, result2.todos_found);
+
+        // 两次扫描的数据库内容应该一致
+        assert_eq!(snapshot1, snapshot2);
+    }
+
+    // 任务 8.9：md 与索引不一致时以 md 为准
+    #[test]
+    fn rescan_overwrites_stale_index() {
+        let temp = TempDir::new().unwrap();
+        let vault_root = temp.path();
+
+        let db_path = vault_root.join(".noteidea").join("test.db");
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let conn = crate::db::open(&db_path).unwrap();
+        let db = crate::db::Handle::new(conn);
+
+        // 写入旧索引（模拟过时数据）
+        db.with(|conn| {
+            conn.execute(
+                "INSERT INTO todos (file_path, line_number, todo_id, text, checked, scanned_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                ("test.md", 1, Some("old"), "旧任务", 1, 1234567890_i64),
+            )?;
+            Ok(())
+        }).unwrap();
+
+        // 现在文件实际内容不同
+        fs::write(vault_root.join("test.md"), "- [ ] 新任务\n").unwrap();
+
+        // 重扫
+        scan_vault(vault_root, &db).unwrap();
+
+        // 验证索引已更新为 md 的实际内容
+        let (text, checked): (String, i64) = db.with(|conn| {
+            conn.query_row(
+                "SELECT text, checked FROM todos WHERE file_path = 'test.md' AND line_number = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        }).unwrap();
+
+        assert_eq!(text, "新任务");
+        assert_eq!(checked, 0, "checked 应该是 false");
     }
 }
