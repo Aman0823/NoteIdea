@@ -293,3 +293,44 @@ body.quick {
   opacity: 0.5;
   cursor: default;
 }
+
+/* ---------- 输入辅助弹层 ---------- */
+.assist-layer {
+  position: fixed;
+  min-width: 200px;
+  max-width: 320px;
+  max-height: 280px;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  z-index: 9999;
+}
+
+.assist-item {
+  padding: 8px 12px;
+  font-size: 14px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border);
+}
+
+.assist-item:last-child {
+  border-bottom: none;
+}
+
+.assist-item:hover {
+  background: rgba(245, 197, 66, 0.1);
+}
+
+.assist-item.selected {
+  background: rgba(245, 197, 66, 0.15);
+  color: var(--accent);
+}
+
+.assist-empty {
+  padding: 12px;
+  font-size: 13px;
+  color: var(--muted);
+  text-align: center;
+}
