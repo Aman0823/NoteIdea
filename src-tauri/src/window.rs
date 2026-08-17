@@ -153,6 +153,20 @@ pub async fn open_time_picker(app: AppHandle) {
     }
 }
 
+/// 关闭时间选择器窗口。
+///
+/// 前端不能直接调 `getCurrentWindow().close()`——capability 只给了
+/// `core:default`，不含窗口关闭权限，那条调用会被静默拦截（连异常都不抛，
+/// 表现为点确定毫无反应，还能反复点出多个时间）。窗口操作一律走 Rust 侧。
+#[tauri::command]
+pub fn close_time_picker(app: AppHandle) {
+    if let Some(win) = app.get_webview_window("time-picker") {
+        if let Err(e) = win.close() {
+            eprintln!("[time-picker] 关闭失败: {e}");
+        }
+    }
+}
+
 #[tauri::command]
 pub fn hotkey_failures(state: State<'_, HotkeyFailures>) -> Vec<String> {
     state.0.clone()

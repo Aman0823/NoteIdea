@@ -150,7 +150,12 @@ impl TodoLine {
 /// 返回 None 表示不是待办行（没有 GFM 复选框前缀）
 pub fn parse(line: &str) -> Option<TodoLine> {
     let (checked, content_start) = todo_prefix(line)?;
+    Some(scan(line, checked, content_start))
+}
 
+/// 扫描元数据区。`parse` 与 `parse_fragment` 的公共实现——
+/// 二者只在「是否要求 GFM 前缀」上不同，扫描规则完全共享。
+fn scan(line: &str, checked: bool, content_start: usize) -> TodoLine {
     // 引号配对：标记引号内区间为「不可解析」
     let quoted = quoted_ranges(line);
 
@@ -264,7 +269,7 @@ pub fn parse(line: &str) -> Option<TodoLine> {
         tokens[metadata_end - 1].end
     };
 
-    Some(TodoLine {
+    TodoLine {
         checked,
         content: Span {
             start: content_start,
@@ -272,7 +277,19 @@ pub fn parse(line: &str) -> Option<TodoLine> {
         },
         markers,
         degraded,
-    })
+    }
+}
+
+/// 解析裸文本片段：不要求 GFM 复选框前缀，其余规则与 `parse` 完全一致。
+///
+/// 速记条里用户敲的是 `买牛奶 @2026-08-15 18:00`，没有 `- [ ] ` 前缀；
+/// 用 `parse` 会一律得到 None，调用方会以为「这行没有任何标记」。
+/// 将来编辑器里在普通段落敲 `@` 也是同样情形。
+///
+/// 复用同一套扫描逻辑，语法规则仍是唯一一份（D1）。
+/// `checked` 恒为 false（没有复选框可言）。
+pub fn parse_fragment(text: &str) -> TodoLine {
+    scan(text, false, 0)
 }
 
 /// 识别 GFM 复选框前缀（容忍前导空格、`*` / `-` 列表符）
@@ -678,6 +695,45 @@ mod tests {
         for m in &result.markers {
             assert!(matches!(m.value, MarkerValue::Tag(_)));
         }
+    }
+
+    #[test]
+    fn test_fragment_without_prefix() {
+        // 速记条的真实输入形态：没有 GFM 前缀
+        let text = "买牛奶 @2026-08-15 18:00";
+        let result = parse_fragment(text);
+        assert_eq!(result.markers.len(), 1, "无前缀也要认出时间标记");
+        assert!(matches!(result.markers[0].value, MarkerValue::Time(_)));
+        // parse 对同样的输入返回 None
+        assert!(parse(text).is_none());
+    }
+
+    #[test]
+    fn test_fragment_time_span_locates_existing_marker() {
+        // 时间选择器要靠这个 span 做「覆盖」而非「追加」
+        let text = "买牛奶 @2026-08-15 18:00";
+        let result = parse_fragment(text);
+        let span = result.markers[0].span;
+        assert_eq!(&text[span.start..=span.end], "@2026-08-15 18:00");
+    }
+
+    #[test]
+    fn test_fragment_halfdone_time_in_degraded() {
+        // 只敲了 @ 还没选时间：落在 degraded，前端同样要能定位并覆盖
+        let text = "买牛奶 @";
+        let result = parse_fragment(text);
+        assert!(result.markers.is_empty());
+        assert_eq!(result.degraded.len(), 1);
+        assert_eq!(result.degraded[0].suspected, MarkerKind::Time);
+        let span = result.degraded[0].span;
+        assert_eq!(&text[span.start..=span.end], "@");
+    }
+
+    #[test]
+    fn test_fragment_plain_text_has_no_marker() {
+        let result = parse_fragment("买牛奶");
+        assert!(result.markers.is_empty());
+        assert!(result.degraded.is_empty(), "纯文本不该产生警告");
     }
 
     #[test]

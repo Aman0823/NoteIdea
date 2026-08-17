@@ -1,5 +1,11 @@
-import { getCurrentWindow } from '@tauri-apps/api/window'
+import { invoke } from '@tauri-apps/api/core'
 import { emit } from '@tauri-apps/api/event'
+
+// 关窗必须走 Rust：capability 只给了 core:default，前端直接
+// getCurrentWindow().close() 会被静默拦截，点了跟没点一样。
+function closeWindow() {
+  void invoke('close_time_picker')
+}
 
 const dateList = document.getElementById('date-list')!
 const timeInput = document.getElementById('time-input')!
@@ -143,13 +149,12 @@ confirmBtn.addEventListener('click', async () => {
   // 发送到速记条
   await emit('time-picker:selected', result)
 
-  // 关闭窗口
-  await getCurrentWindow().close()
+  closeWindow()
 })
 
 // ESC 关闭窗口
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
-    getCurrentWindow().close()
+    closeWindow()
   }
 })
