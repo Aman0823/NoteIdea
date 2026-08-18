@@ -165,11 +165,12 @@ fn migrate(conn: &Connection, from: i64) -> Result<(), String> {
 ///
 /// 用 `Mutex` 而非连接池：单写者 actor 是唯一的写方，读方也少，
 /// 池化只会增加复杂度。真需要并发读时再改。
-pub struct Handle(std::sync::Mutex<Connection>);
+#[derive(Clone)]
+pub struct Handle(std::sync::Arc<std::sync::Mutex<Connection>>);
 
 impl Handle {
     pub fn new(conn: Connection) -> Self {
-        Self(std::sync::Mutex::new(conn))
+        Self(std::sync::Arc::new(std::sync::Mutex::new(conn)))
     }
 
     /// 借用连接执行一段操作。锁中毒（持锁线程 panic）时报错而不是继续用，

@@ -29,6 +29,14 @@ pub struct ChangeSet {
     pub base_hash: Option<String>,
 }
 
+/// 一处字符偏移编辑。`from`/`to` 是 UTF-16 code unit 偏移（与 CM6 一致）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Edit {
+    pub from: usize,
+    pub to: usize,
+    pub insert: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Operation {
@@ -38,6 +46,8 @@ pub enum Operation {
     ReplaceLine { line_number: usize, old_content: String, new_content: String },
     /// 新建文件。目标已存在则失败。
     Create { content: String },
+    /// 字符偏移变更。偏移相对 ChangeSet 的严格基线哈希。
+    ApplyEdits { edits: Vec<Edit> },
     /// 整文件替换。仅版本恢复可用——它的语义本就是整体回退。
     ReplaceFile { content: String },
 }
@@ -48,6 +58,7 @@ impl Operation {
             Self::Append { .. } => "append",
             Self::ReplaceLine { .. } => "replace_line",
             Self::Create { .. } => "create",
+            Self::ApplyEdits { .. } => "apply_edits",
             Self::ReplaceFile { .. } => "replace_file",
         }
     }
@@ -173,29 +184,26 @@ pub fn discard_failed(db: &crate::db::Handle, id: i64) -> Result<bool, String> {
 pub fn spawn<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     vault_root: PathBuf,
+    db: crate::db::Handle,
 ) -> Handle {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Request>();
     let handle = Handle(tx);
 
     tauri::async_runtime::spawn(async move {
         // 先消费上次没写完的，再接受新请求（崩溃恢复）。
-        drain(&app, &vault_root).await;
+        drain(&app, &db, &vault_root).await;
 
         while let Some(req) = rx.recv().await {
             match req {
                 Request::Enqueue { cs, reply } => {
-                    use tauri::Manager;
-                    let result = match app.try_state::<crate::db::Handle>() {
-                        Some(db) => enqueue_to_db(&db, &cs),
-                        None => Err("数据库不可用".to_string()),
-                    };
+                    let result = enqueue_to_db(&db, &cs);
                     let ok = result.is_ok();
                     let _ = reply.send(result);
                     if ok {
-                        drain(&app, &vault_root).await;
+                        drain(&app, &db, &vault_root).await;
                     }
                 }
-                Request::Drain => drain(&app, &vault_root).await,
+                Request::Drain => drain(&app, &db, &vault_root).await,
             }
         }
         eprintln!("[actor] 请求通道已关闭，写入服务停止");
@@ -223,12 +231,13 @@ pub fn enqueue_to_db(db: &crate::db::Handle, cs: &ChangeSet) -> Result<i64, Stri
 ///
 /// 遇到失败就停：后续变更很可能针对同一文件，继续处理只会连环失败，
 /// 而且会掩盖第一个错误。
-async fn drain<R: tauri::Runtime>(app: &tauri::AppHandle<R>, vault_root: &Path) {
-    use tauri::Manager;
-    let Some(db) = app.try_state::<crate::db::Handle>() else { return };
-
+async fn drain<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    db: &crate::db::Handle,
+    vault_root: &Path,
+) {
     loop {
-        match step(&db, vault_root).await {
+        match step(db, vault_root).await {
             Step::Empty => return,
             Step::Done(cs) => emit_changed(app, &cs),
             Step::Retrying => {}
@@ -430,7 +439,7 @@ fn emit_changed<R: tauri::Runtime>(app: &tauri::AppHandle<R>, cs: &ChangeSet) {
     use tauri::Emitter;
     let _ = app.emit(
         "file:changed",
-        serde_json::json!({ "file": cs.file_path, "op": cs.op.name() }),
+        serde_json::json!({ "file": cs.file_path, "op": cs.op.name(), "change_set": cs }),
     );
 }
 
@@ -504,6 +513,72 @@ pub fn apply(vault_root: &Path, cs: &ChangeSet) -> Result<(), WriteError> {
             let current = read(&path)?;
             replace_line(&path, &current, cs, *line_number, old_content, new_content)
         }
+        Operation::ApplyEdits { edits } => apply_edits(&path, cs, edits),
+    }
+}
+
+/// 应用以基线内容为坐标系的编辑。偏移单位是 **UTF-16 code unit**——
+/// 与前端 CodeMirror 的 `ChangeSet.iterChanges` 输出一致，前端不用再换算，
+/// 含中文/ emoji 也不会错位。
+///
+/// 先完成全部校验，之后才拼出新内容并原子写盘。这样单个坏区间不会留下
+/// 「前半批已写、后半批失败」的中间态。
+fn apply_edits(path: &Path, cs: &ChangeSet, edits: &[Edit]) -> Result<(), WriteError> {
+    let current = read(path)?;
+    let Some(expected_hash) = cs.base_hash.as_deref() else {
+        return Err(WriteError::Rejected("apply_edits 必须携带基线哈希".into()));
+    };
+    let actual_hash = hash(&current);
+    if actual_hash != expected_hash {
+        return Err(WriteError::Rejected(format!(
+            "编辑冲突：磁盘内容已变化（当前哈希：{actual_hash}）"
+        )));
+    }
+
+    let len_utf16: usize = current.chars().map(char::len_utf16).sum();
+
+    let mut ordered = edits.to_vec();
+    ordered.sort_by(|a, b| b.from.cmp(&a.from).then_with(|| b.to.cmp(&a.to)));
+
+    let mut previous_from = len_utf16;
+    let mut resolved: Vec<(usize, usize, &str)> = Vec::with_capacity(ordered.len());
+    for edit in &ordered {
+        if edit.from > edit.to || edit.to > len_utf16 {
+            return Err(WriteError::Rejected("编辑区间超出文件边界".into()));
+        }
+        // 偏移必须正好落在 UTF-16 字符边界上（不能把 surrogate pair 拆开）。
+        let from_byte = utf16_to_byte(&current, edit.from)
+            .ok_or_else(|| WriteError::Rejected("编辑区间未对齐字符边界".into()))?;
+        let to_byte = utf16_to_byte(&current, edit.to)
+            .ok_or_else(|| WriteError::Rejected("编辑区间未对齐字符边界".into()))?;
+        if edit.to > previous_from {
+            return Err(WriteError::Rejected("编辑区间重叠".into()));
+        }
+        previous_from = edit.from;
+        resolved.push((from_byte, to_byte, edit.insert.as_str()));
+    }
+
+    // 预转换的字节偏移按 from 降序应用：后面的编辑不影响前面（较小）偏移。
+    let mut updated = current;
+    for (from_byte, to_byte, insert) in resolved {
+        updated.replace_range(from_byte..to_byte, insert);
+    }
+    write_atomic(path, &updated)
+}
+
+/// 把 UTF-16 偏移转成字节偏移。偏移不落在字符边界（surrogate 中间）时返回 None。
+fn utf16_to_byte(s: &str, utf16: usize) -> Option<usize> {
+    let mut seen = 0usize;
+    for (byte, ch) in s.char_indices() {
+        if seen == utf16 {
+            return Some(byte);
+        }
+        seen += ch.len_utf16();
+    }
+    if seen == utf16 {
+        Some(s.len())
+    } else {
+        None
     }
 }
 
@@ -653,6 +728,107 @@ mod tests {
 
     fn cs(file: &str, op: Operation, base: Option<String>) -> ChangeSet {
         ChangeSet { file_path: file.into(), op, base_hash: base }
+    }
+
+    #[test]
+    fn apply_edits_applies_multiple_non_adjacent_changes() {
+        let t = Tmp::new("apply-edits-multiple");
+        let original = "第一行\n中间不变\n最后一行\n";
+        t.write("note.md", original);
+        // UTF-16 布局：第一行(3) \n 中间不变(4) \n 最后一行(4) \n
+        // "第一行" = 0..3，"最后一行" = 9..13
+        let edits = vec![
+            Edit { from: 0, to: 3, insert: "标题".into() },
+            Edit { from: 9, to: 13, insert: "结尾".into() },
+        ];
+        let changes = cs("note.md", Operation::ApplyEdits { edits }, Some(hash(original)));
+        apply(&t.0, &changes).unwrap();
+        assert_eq!(t.read("note.md"), "标题\n中间不变\n结尾\n");
+    }
+
+    #[test]
+    fn apply_edits_uses_utf16_offsets_not_bytes() {
+        let t = Tmp::new("apply-edits-utf16");
+        let original = "中文\n";
+        t.write("note.md", original);
+        // "中文" 是 2 个 UTF-16 code unit（6 个 UTF-8 字节）。
+        // 前端 CM6 传来的偏移是 UTF-16，替换 0..2 必须按字符边界处理。
+        let changes = cs(
+            "note.md",
+            Operation::ApplyEdits {
+                edits: vec![Edit { from: 0, to: 2, insert: "AB".into() }],
+            },
+            Some(hash(original)),
+        );
+        apply(&t.0, &changes).unwrap();
+        assert_eq!(t.read("note.md"), "AB\n");
+    }
+
+    #[test]
+    fn apply_edits_rejects_stale_base_without_touching_file() {
+        let t = Tmp::new("apply-edits-conflict");
+        let original = "原始内容\n";
+        t.write("note.md", original);
+        let changes = cs(
+            "note.md",
+            Operation::ApplyEdits {
+                edits: vec![Edit { from: 0, to: 2, insert: "改".into() }],
+            },
+            Some(hash("不是当前内容")),
+        );
+        let error = apply(&t.0, &changes).unwrap_err().to_string();
+        assert!(error.contains("编辑冲突"));
+        assert!(error.contains(&hash(original)));
+        assert_eq!(t.read("note.md"), original);
+    }
+
+    #[test]
+    fn apply_edits_rejects_invalid_batch_before_writing() {
+        let t = Tmp::new("apply-edits-invalid");
+        let original = "0123456789";
+        t.write("note.md", original);
+        let changes = cs(
+            "note.md",
+            Operation::ApplyEdits {
+                edits: vec![
+                    Edit { from: 0, to: 1, insert: "a".into() },
+                    Edit { from: 9, to: 20, insert: "b".into() },
+                ],
+            },
+            Some(hash(original)),
+        );
+        assert!(apply(&t.0, &changes).is_err());
+        assert_eq!(t.read("note.md"), original);
+    }
+
+    #[test]
+    fn apply_edits_rejects_overlapping_and_reversed_ranges() {
+        let t = Tmp::new("apply-edits-overlap");
+        let original = "0123456789";
+        t.write("note.md", original);
+        for edits in [
+            vec![
+                Edit { from: 2, to: 6, insert: "a".into() },
+                Edit { from: 4, to: 8, insert: "b".into() },
+            ],
+            vec![Edit { from: 8, to: 3, insert: "x".into() }],
+        ] {
+            let changes = cs("note.md", Operation::ApplyEdits { edits }, Some(hash(original)));
+            assert!(apply(&t.0, &changes).is_err());
+            assert_eq!(t.read("note.md"), original);
+        }
+    }
+
+    #[test]
+    fn apply_edits_rejects_missing_base_hash() {
+        let t = Tmp::new("apply-edits-no-base");
+        t.write("note.md", "内容");
+        let changes = cs(
+            "note.md",
+            Operation::ApplyEdits { edits: Vec::new() },
+            None,
+        );
+        assert!(apply(&t.0, &changes).is_err());
     }
 
     #[test]
