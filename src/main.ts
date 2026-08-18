@@ -1,6 +1,14 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
+import { ChangeSet } from '@codemirror/state';
+import { createNoteEditor, type NoteEditor } from './editor/editor';
+import { primeParseCache } from './editor/decorations';
+
+const diagnosticsEl = document.querySelector<HTMLElement>('#diagnostics')!;
+document.querySelector<HTMLButtonElement>('#diagnostics-toggle')!.addEventListener('click', () => {
+  diagnosticsEl.classList.toggle('hidden');
+});
 
 const statsEl = document.querySelector<HTMLDivElement>('#stats')!;
 const samplesEl = document.querySelector<HTMLUListElement>('#samples')!;
@@ -84,25 +92,71 @@ invoke<string[]>('hotkey_failures').then(renderHotkeyFailures);
 
 const vaultCard = document.querySelector<HTMLElement>('#vault-card')!;
 const vaultReason = document.querySelector<HTMLParagraphElement>('#vault-reason')!;
+const welcomeCard = document.querySelector<HTMLElement>('#welcome-card')!;
+const workspaceLabel = document.querySelector<HTMLParagraphElement>('#workspace-label')!;
 
-async function refreshVault() {
-  const reason = await invoke<string | null>('vault_state');
-  // reason 为 null 说明 vault 可用，此时不打扰用户。
-  vaultCard.classList.toggle('hidden', reason === null);
-  if (reason !== null) vaultReason.textContent = `${reason}。速记和笔记功能需要先指定一个文件夹。`;
+const workspaceEl = document.querySelector<HTMLElement>('#editor-workspace')!;
+
+function clearWorkspaceView() {
+  currentPath = null;
+  workspaceEl.classList.add('hidden');
+  noteTitleEl.textContent = '选择一篇笔记';
+  notePathEl.textContent = '';
+  editorEmptyEl.classList.remove('hidden');
+  resetEditor();
 }
 
-document.querySelector<HTMLButtonElement>('#choose-vault')!.addEventListener('click', async () => {
-  const picked = await open({ directory: true, multiple: false, title: '选择笔记存放文件夹' });
-  if (typeof picked !== 'string') return; // 用户取消
+interface WorkspaceState {
+  ready: boolean;
+  chosenBefore: boolean;
+  path: string | null;
+  reason: string | null;
+}
+
+async function refreshVault() {
+  const state = await invoke<WorkspaceState>('vault_state');
+  if (!state.ready) {
+    clearWorkspaceView();
+    // 首次从未选过：正常欢迎态；已保存路径失效：可见故障提示。
+    welcomeCard.classList.toggle('hidden', state.chosenBefore);
+    vaultCard.classList.toggle('hidden', !state.chosenBefore);
+    if (state.chosenBefore) {
+      vaultReason.textContent = `${state.reason ?? '工作区不可用'}。请选择一个可用的工作区。`;
+      workspaceLabel.textContent = '工作区不可用';
+    } else {
+      workspaceLabel.textContent = '本地 Markdown 笔记';
+    }
+    return;
+  }
+
+  vaultCard.classList.add('hidden');
+  welcomeCard.classList.add('hidden');
+  workspaceEl.classList.remove('hidden');
+  workspaceLabel.textContent = state.path ?? '已恢复上次工作区';
+  await refreshTree();
+}
+
+async function chooseWorkspace() {
+  const picked = await open({ directory: true, multiple: false, title: '选择笔记工作区' });
+  if (typeof picked !== 'string') return;
+  // 切换工作区前先落盘当前缓冲；失败则不切走，避免旧工作区内容丢失。
+  if (!(await flush())) return;
   try {
     await invoke('choose_vault', { path: picked });
   } catch (e) {
+    clearWorkspaceView();
+    welcomeCard.classList.add('hidden');
+    vaultCard.classList.remove('hidden');
     vaultReason.textContent = `选择失败：${String(e)}`;
     return;
   }
-  await refreshVault();
-});
+  // choose_vault 会发 vault:changed，refreshVault 会据此刷新并加载文件树；
+  // 这里只清理旧视图，不重复刷树。
+  clearWorkspaceView();
+}
+
+document.querySelector<HTMLButtonElement>('#choose-vault')!.addEventListener('click', chooseWorkspace);
+document.querySelector<HTMLButtonElement>('#welcome-choose')!.addEventListener('click', chooseWorkspace);
 
 listen('vault:changed', refreshVault);
 
@@ -188,6 +242,255 @@ async function refreshFailed() {
 listen('write:failed', refreshFailed);
 // 重试成功后那条会从失败列表消失。
 listen('file:changed', refreshFailed);
+
+// ---------- 文件树与笔记打开 ----------
+
+interface NoteTreeNode {
+  name: string;
+  path: string;
+  kind: 'directory' | 'file';
+  children: NoteTreeNode[];
+  error: string | null;
+}
+
+interface NoteContent {
+  path: string;
+  content: string;
+  hash: string;
+}
+
+const treeEl = document.querySelector<HTMLElement>('#note-tree')!;
+const treeStatusEl = document.querySelector<HTMLDivElement>('#tree-status')!;
+const noteTitleEl = document.querySelector<HTMLSpanElement>('#note-title')!;
+const notePathEl = document.querySelector<HTMLSpanElement>('#note-path')!;
+const editorHostEl = document.querySelector<HTMLDivElement>('#note-editor')!;
+const editorEmptyEl = document.querySelector<HTMLDivElement>('#editor-empty')!;
+
+let currentPath: string | null = null;
+
+// ---------- 编辑器与自动保存 ----------
+
+let editor: NoteEditor | null = null;
+let savedHash = '';
+// 自上次落盘基线以来的未提交变更（相对 savedHash 所指内容的字符偏移）。
+let unconfirmed: ChangeSet | null = null;
+let autosaveTimer: number | null = null;
+let flushing = false;
+
+function resetEditor() {
+  if (autosaveTimer !== null) {
+    clearTimeout(autosaveTimer);
+    autosaveTimer = null;
+  }
+  if (editor !== null) {
+    editor.destroy();
+    editor = null;
+  }
+  unconfirmed = null;
+  savedHash = '';
+  flushing = false;
+  editorHostEl.classList.add('hidden');
+}
+
+function showEditor() {
+  editorHostEl.classList.remove('hidden');
+  editorEmptyEl.classList.add('hidden');
+}
+
+function scheduleAutosave() {
+  if (autosaveTimer !== null) clearTimeout(autosaveTimer);
+  autosaveTimer = window.setTimeout(() => {
+    autosaveTimer = null;
+    void flush();
+  }, 800);
+}
+
+async function flush(): Promise<boolean> {
+  if (flushing) return true;
+  if (editor === null || currentPath === null || unconfirmed === null) return true;
+  // 无变更不提交空 ChangeSet。
+  if (unconfirmed.empty) return true;
+
+  // 快照本次要提交的变更与提交时的基线内容，并立即把 unconfirmed 重置为
+  // 相对「提交后新基线」的空变更。这样 flush 期间用户继续输入的内容会累积到
+  // 正确的新坐标系，而不是被乐观更新吞掉。
+  const submitted = unconfirmed;
+  const baseContent = editor.getContent();
+  const edits: { from: number; to: number; insert: string }[] = [];
+  submitted.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
+    edits.push({ from: fromA, to: toA, insert: inserted.toString() });
+  });
+  unconfirmed = ChangeSet.empty(editor.view.state.doc.length);
+
+  flushing = true;
+  try {
+    await invoke('apply_edits', {
+      filePath: currentPath,
+      baseHash: savedHash,
+      edits,
+    });
+    // 落盘基线推进到提交时那份内容（baseContent），而非此刻可能又变了的缓冲。
+    savedHash = await invoke<string>('hash_content', { content: baseContent });
+    return true;
+  } catch (e) {
+    // 入队失败：把快照合并回 unconfirmed，用户已敲的内容不丢。
+    unconfirmed = submitted.compose(unconfirmed);
+    showSaveError(String(e));
+    return false;
+  } finally {
+    flushing = false;
+    if (unconfirmed !== null && !unconfirmed.empty) scheduleAutosave();
+  }
+}
+
+function showSaveError(message: string) {
+  // 复用诊断面板的失败可见通道：不静默吞掉落盘失败。
+  const box = document.createElement('div');
+  box.className = 'warn';
+  box.textContent = `保存失败：${message}`;
+  warningsEl.append(box);
+}
+
+// 窗口失焦或隐藏（主窗口关闭即隐藏）时立即落盘，不等 debounce。
+window.addEventListener('blur', () => {
+  void flush();
+});
+
+function setTreeStatus(message: string | null) {
+  treeStatusEl.textContent = message ?? '';
+  treeStatusEl.classList.toggle('hidden', message === null);
+}
+
+function renderNodes(nodes: NoteTreeNode[], container: HTMLElement) {
+  for (const node of nodes) {
+    if (node.kind === 'file') {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'tree-node';
+      button.dataset.path = node.path;
+      const icon = document.createElement('span');
+      icon.className = 'tree-twisty';
+      const label = document.createElement('span');
+      label.className = 'tree-label';
+      label.textContent = node.name;
+      button.append(icon, label);
+      button.addEventListener('click', () => openNote(node.path));
+      container.append(button);
+      continue;
+    }
+
+    const wrapper = document.createElement('div');
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'tree-node';
+    const twisty = document.createElement('span');
+    twisty.className = 'tree-twisty';
+    twisty.textContent = '▾';
+    const label = document.createElement('span');
+    label.className = 'tree-label';
+    label.textContent = node.name;
+    toggle.append(twisty, label);
+
+    const children = document.createElement('div');
+    children.className = 'tree-children';
+    if (node.error !== null) {
+      const error = document.createElement('div');
+      error.className = 'tree-error';
+      error.textContent = node.error;
+      children.append(error);
+    }
+    renderNodes(node.children, children);
+
+    toggle.addEventListener('click', () => {
+      const collapsed = children.classList.toggle('hidden');
+      twisty.textContent = collapsed ? '▸' : '▾';
+    });
+
+    wrapper.append(toggle, children);
+    container.append(wrapper);
+  }
+}
+
+function markActive(path: string | null) {
+  for (const node of treeEl.querySelectorAll<HTMLButtonElement>('.tree-node[data-path]')) {
+    node.setAttribute('aria-current', String(node.dataset.path === path));
+  }
+}
+
+async function refreshTree() {
+  setTreeStatus('正在读取笔记...');
+  let tree: NoteTreeNode;
+  try {
+    tree = await invoke<NoteTreeNode>('list_notes');
+  } catch (e) {
+    treeEl.replaceChildren();
+    setTreeStatus(`读取笔记失败：${String(e)}`);
+    return;
+  }
+
+  treeEl.replaceChildren();
+  renderNodes(tree.children, treeEl);
+  setTreeStatus(tree.children.length === 0 ? '这个文件夹里还没有 Markdown 笔记。' : null);
+  markActive(currentPath);
+}
+
+async function openNote(path: string) {
+  // 切换前先落盘当前缓冲；落盘失败则留在当前笔记（design E8）。
+  if (!(await flush())) return;
+
+  let note: NoteContent;
+  try {
+    note = await invoke<NoteContent>('read_note', { path });
+  } catch (e) {
+    // 文件可能已被外部删除：如实报告并刷新，不创建空文件顶替。
+    noteTitleEl.textContent = '打开失败';
+    notePathEl.textContent = String(e);
+    resetEditor();
+    editorEmptyEl.classList.remove('hidden');
+    currentPath = null;
+    await refreshTree();
+    return;
+  }
+
+  currentPath = note.path;
+  noteTitleEl.textContent = note.path.split('/').pop() ?? note.path;
+  notePathEl.textContent = note.path;
+  savedHash = note.hash;
+  unconfirmed = ChangeSet.empty(note.content.length);
+
+  // 打开即批量解析（design E4）：一次 invoke 填满缓存，避免滚动时逐屏补请求。
+  // 不 await——解析没回来之前按原文显示即可，不该拖慢打开。
+  void primeParseCache(note.content.split('\n'));
+
+  if (editor !== null) editor.destroy();
+  editor = createNoteEditor(editorHostEl, note.content, (update) => {
+    if (update.docChanged && unconfirmed !== null) {
+      unconfirmed = unconfirmed.compose(update.changes);
+      scheduleAutosave();
+    }
+  });
+  showEditor();
+  markActive(currentPath);
+}
+
+document.querySelector<HTMLButtonElement>('#refresh-notes')!.addEventListener('click', refreshTree);
+
+document.querySelector<HTMLButtonElement>('#new-note')!.addEventListener('click', async () => {
+  const name = window.prompt('新笔记名称（可含子目录，例如 工作/周报.md）');
+  if (name === null) return;
+  const trimmed = name.trim();
+  if (trimmed === '') return;
+  const filePath = trimmed.toLowerCase().endsWith('.md') ? trimmed : `${trimmed}.md`;
+
+  try {
+    await invoke('create', { filePath, content: '' });
+  } catch (e) {
+    setTreeStatus(`新建失败：${String(e)}`);
+    return;
+  }
+  await refreshTree();
+  await openNote(filePath);
+});
 
 refreshVault();
 refreshFailed();

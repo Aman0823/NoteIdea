@@ -1,7 +1,11 @@
 // 待办行解析结果的 TS 类型，与 Rust 的 todo::syntax 对应
 // 不复制任何语法规则——语法由 Rust 唯一定义（D1）
+//
+// 形状由 Rust 侧的 test_json_shape_is_what_frontend_expects 钉死。
+// 改这里之前先看那个测试，别凭印象改。
 
 export interface Span {
+  /** UTF-8 字节偏移，闭区间 [start, end] */
   start: number
   end: number
 }
@@ -12,10 +16,11 @@ export type DatePart =
   | { kind: 'tomorrow' }
 
 export interface TimeExpr {
-  date?: DatePart
-  time?: [number, number] // [hour, minute]
+  date: DatePart | null
+  time: [number, number] | null // [hour, minute]
 }
 
+// 内部带标签：every_Nd / every_Nw 的数字在 `n` 上，不是 `value`
 export type Recurrence =
   | { kind: 'once' }
   | { kind: 'daily' }
@@ -23,14 +28,17 @@ export type Recurrence =
   | { kind: 'monthly' }
   | { kind: 'yearly' }
   | { kind: 'weekdays' }
-  | { kind: 'every_days'; value: number }
-  | { kind: 'every_weeks'; value: number }
+  | { kind: 'every_days'; n: number }
+  | { kind: 'every_weeks'; n: number }
 
-export type Intensity = { kind: 'toast' } | { kind: 'ring' } | { kind: 'full' }
+// 裸字符串，不是对象
+export type Intensity = 'toast' | 'ring' | 'full'
+
+export type MarkerKind = 'time' | 'repeat' | 'tag' | 'intensity' | 'id'
 
 export type MarkerValue =
   | { kind: 'time'; value: TimeExpr }
-  | { kind: 'repeat'; value: Recurrence[] }
+  | { kind: 'repeat'; value: Recurrence }
   | { kind: 'tag'; value: string }
   | { kind: 'intensity'; value: Intensity }
   | { kind: 'id'; value: string }
@@ -41,7 +49,7 @@ export interface Marker {
 }
 
 export interface Degraded {
-  suspected: string // "time" | "repeat" | "tag" | "intensity" | "id"
+  suspected: MarkerKind
   span: Span
 }
 
@@ -50,4 +58,6 @@ export interface TodoLine {
   content: Span
   markers: Marker[]
   degraded: Degraded[]
+  /** 引号屏蔽区间（含引号本身） */
+  quoted: Span[]
 }

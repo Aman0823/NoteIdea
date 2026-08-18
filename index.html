@@ -7,57 +7,67 @@
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body class="main">
-    <main>
-      <h1>NoteIdea 骨架</h1>
-      <p class="lead">
-        这一期只验证一件事：<strong>热键按下到速记条可输入的真实延迟</strong>（NFR-2 定的成败线是
-        200ms）。数字达不到，D22 的预热方案和一串下游决策都要重写。
-      </p>
+    <main class="workspace">
+      <header class="app-header">
+        <div>
+          <h1>NoteIdea</h1>
+          <p id="workspace-label">本地 Markdown 笔记</p>
+        </div>
+        <div class="header-actions">
+          <button id="choose-vault" type="button">选择工作区</button>
+          <button id="diagnostics-toggle" class="icon-button" type="button" title="显示诊断面板" aria-label="显示诊断面板">i</button>
+        </div>
+      </header>
 
-      <section id="vault-card" class="card hidden">
-        <h2>笔记存放位置</h2>
-        <p id="vault-reason" class="hint" style="border: 0; margin-top: 0; padding-top: 0"></p>
-        <button id="choose-vault" type="button">选择笔记文件夹</button>
+      <section id="welcome-card" class="welcome-card">
+        <div class="welcome-mark">N</div>
+        <h2>从一个工作区开始</h2>
+        <p>选择一个文件夹，NoteIdea 会在这里显示其中的 Markdown 笔记。</p>
+        <button id="welcome-choose" type="button">选择工作区</button>
       </section>
 
-      <section class="card">
-        <h2>怎么测</h2>
-        <ol>
-          <li>按 <kbd>Alt</kbd> + <kbd>Space</kbd> 唤出速记条，敲点字，<kbd>Enter</kbd> 存入 inbox，或 <kbd>Esc</kbd> 取消。</li>
-          <li>反复唤出十几次（第一次通常最慢，之后进入稳态）。</li>
-          <li>回到这里点「刷新测量结果」。</li>
-        </ol>
-        <p class="hint">
-          计时全部在 Rust 侧的单调时钟上完成：热键触发记起点，前端聚焦输入框并等一帧真正绘制完成后回调记终点。
-        </p>
+      <section id="vault-card" class="vault-notice hidden">
+        <div>
+          <strong>工作区不可用</strong>
+          <p id="vault-reason"></p>
+        </div>
       </section>
 
-      <section class="card">
-        <h2>测量结果</h2>
-        <button id="refresh" type="button">刷新测量结果</button>
-        <div id="stats" class="stats">尚无数据。先按 Alt+Space 试几次。</div>
-        <ul id="samples" class="samples"></ul>
+      <section id="editor-workspace" class="editor-workspace hidden">
+        <aside class="note-sidebar">
+          <div class="sidebar-header">
+            <span>笔记</span>
+            <div class="sidebar-actions">
+              <button id="new-note" class="icon-button" type="button" title="新建笔记" aria-label="新建笔记">+</button>
+              <button id="refresh-notes" class="icon-button" type="button" title="刷新文件树" aria-label="刷新文件树">&#8635;</button>
+            </div>
+          </div>
+          <div id="tree-status" class="tree-status">正在读取笔记...</div>
+          <nav id="note-tree" class="note-tree" aria-label="笔记文件树"></nav>
+          <p class="tree-hint">外部改动需手动刷新</p>
+        </aside>
+
+        <section class="editor-panel">
+          <div class="editor-header">
+            <span id="note-title">选择一篇笔记</span>
+            <span id="note-path"></span>
+          </div>
+          <div id="editor-empty" class="editor-empty">从左侧打开一篇 Markdown 笔记</div>
+          <div id="note-editor" class="note-editor hidden"></div>
+        </section>
       </section>
 
-      <section id="failed-card" class="card hidden">
-        <h2>写入失败</h2>
-        <p class="hint" style="border: 0; margin-top: 0; padding-top: 0">
-          这些修改重试三次后仍未写入磁盘，内容还留着。修好原因（比如权限、磁盘空间）后点重试，
-          或者确认不要了再丢弃。
-        </p>
-        <ul id="failed-list" class="failed"></ul>
-      </section>
-
-      <section class="card">
-        <h2>其他可验证的点</h2>
-        <ul class="checks">
-          <li><kbd>Alt</kbd> + <kbd>N</kbd> 唤出本窗口（FR-20）</li>
-          <li>关闭本窗口只隐藏、进程留在托盘（FR-13）</li>
-          <li>托盘左键 = 速记条，右键菜单可退出</li>
-          <li>再启动一个实例，应当聚焦已有实例并弹速记条，而不是开第二个进程（D23）</li>
-          <li>速记条写入的内容落在 <code>vault/inbox.md</code></li>
-        </ul>
-        <div id="warnings" class="warnings"></div>
+      <section id="diagnostics" class="diagnostics hidden">
+        <div id="warnings"></div>
+        <section id="failed-card" class="diagnostic-section hidden">
+          <h2>写入失败</h2>
+          <ul id="failed-list" class="failed"></ul>
+        </section>
+        <section class="diagnostic-section">
+          <div class="diagnostic-heading"><h2>热键延迟</h2><button id="refresh" type="button">刷新</button></div>
+          <div id="stats" class="stats">尚无数据。</div>
+          <ul id="samples" class="samples"></ul>
+        </section>
       </section>
     </main>
     <script type="module" src="/src/main.ts"></script>
