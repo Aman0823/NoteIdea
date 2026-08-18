@@ -60,11 +60,27 @@ async fn capture(
         .map(|_| ())
 }
 
-/// vault 当前是否可用，以及不可用的原因。前端据此决定是否显示选择入口。
+/// 面向主窗口的工作区状态。`NotChosen` 与已保存路径失效必须区分：前者是
+/// 正常的首次欢迎态，后者才需要可见的故障提示。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceState {
+    ready: bool,
+    chosen_before: bool,
+    path: Option<String>,
+    reason: Option<String>,
+}
+
+/// 工作区当前是否可用，以及不可用的原因。
 #[tauri::command]
-fn vault_state(vault: State<'_, VaultState>) -> Result<Option<String>, String> {
+fn vault_state(vault: State<'_, VaultState>) -> Result<WorkspaceState, String> {
     let status = vault.0.lock().map_err(|_| "vault 状态锁失败")?;
-    Ok(status.reason())
+    Ok(WorkspaceState {
+        ready: status.ready_path().is_some(),
+        chosen_before: !matches!(&*status, VaultStatus::NotChosen),
+        path: status.ready_path().map(|path| path.to_string_lossy().into_owned()),
+        reason: status.reason(),
+    })
 }
 
 /// 已放弃的写入列表（FR：写失败不得静默丢弃）。
@@ -96,6 +112,117 @@ fn discard_write(id: i64, db: State<'_, db::Handle>) -> Result<(), String> {
         return Err("该记录已不存在或不处于失败状态".into());
     }
     Ok(())
+}
+
+/// 文件树节点。目录读取失败时保留节点并返回错误信息，避免静默丢失。
+#[derive(Debug, Clone, serde::Serialize)]
+struct NoteTreeNode {
+    name: String,
+    path: String,
+    kind: &'static str,
+    children: Vec<NoteTreeNode>,
+    error: Option<String>,
+}
+
+fn collect_notes(dir: &std::path::Path, vault_root: &std::path::Path) -> NoteTreeNode {
+    let relative = dir.strip_prefix(vault_root).unwrap_or(dir);
+    let path = relative.to_string_lossy().replace('\\', "/");
+    let name = dir
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "笔记".into());
+    let mut node = NoteTreeNode {
+        name,
+        path,
+        kind: "directory",
+        children: Vec::new(),
+        error: None,
+    };
+
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            node.error = Some(format!("读取目录失败: {e}"));
+            return node;
+        }
+    };
+
+    let mut entries: Vec<_> = entries.filter_map(Result::ok).collect();
+    entries.sort_by_key(|entry| entry.file_name().to_ascii_lowercase());
+    for entry in entries {
+        let entry_path = entry.path();
+        let file_name = entry.file_name().to_string_lossy().into_owned();
+        if file_name == vault::STATE_DIR || file_name == vault::ASSETS {
+            continue;
+        }
+        if entry_path.is_dir() {
+            let child = collect_notes(&entry_path, vault_root);
+            if child.error.is_some() || !child.children.is_empty() {
+                node.children.push(child);
+            }
+        } else if entry_path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("md")) {
+            let relative = entry_path.strip_prefix(vault_root).unwrap_or(&entry_path);
+            node.children.push(NoteTreeNode {
+                name: file_name,
+                path: relative.to_string_lossy().replace('\\', "/"),
+                kind: "file",
+                children: Vec::new(),
+                error: None,
+            });
+        }
+    }
+    node
+}
+
+/// 列出 vault 内的 Markdown 目录树。
+#[tauri::command]
+fn list_notes(vault: State<'_, VaultState>) -> Result<NoteTreeNode, String> {
+    let status = vault.0.lock().map_err(|_| "vault 状态锁失败")?;
+    let root = status.ready_path().ok_or_else(|| status.reason().unwrap_or_else(|| "vault 不可用".into()))?;
+    Ok(collect_notes(root, root))
+}
+
+/// 将用户提供的相对路径安全地解析到 vault 内。
+fn note_path(root: &std::path::Path, relative: &str) -> Result<std::path::PathBuf, String> {
+    let path = std::path::Path::new(relative);
+    if path.is_absolute() || path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return Err("笔记路径必须是 vault 内的相对路径".into());
+    }
+    let resolved = root.join(path);
+    if !resolved.starts_with(root) {
+        return Err("笔记路径越出 vault".into());
+    }
+    Ok(resolved)
+}
+
+/// 读取笔记内容与同步基线哈希。
+#[derive(Debug, Clone, serde::Serialize)]
+struct NoteContent {
+    path: String,
+    content: String,
+    hash: String,
+}
+
+#[tauri::command]
+fn read_note(path: String, vault: State<'_, VaultState>) -> Result<NoteContent, String> {
+    let status = vault.0.lock().map_err(|_| "vault 状态锁失败")?;
+    let root = status.ready_path().ok_or_else(|| status.reason().unwrap_or_else(|| "vault 不可用".into()))?;
+    let full_path = note_path(root, &path)?;
+    let content = std::fs::read_to_string(&full_path).map_err(|e| format!("读取笔记失败: {e}"))?;
+    Ok(NoteContent { path, hash: actor::hash(&content), content })
+}
+
+/// 批量解析多行，打开文件时一次填充编辑器的语法缓存。
+#[tauri::command]
+fn parse_todo_lines(lines: Vec<String>) -> Vec<Option<todo::syntax::TodoLine>> {
+    lines.into_iter().map(|line| todo::syntax::parse(&line)).collect()
+}
+
+/// 计算内容哈希，与 `read_note` / `apply_edits` 用同一套 blake3 口径。
+/// 编辑器保存成功后用它更新下一次提交的基线哈希，避免前端另起一套哈希实现。
+#[tauri::command]
+fn hash_content(content: String) -> String {
+    actor::hash(&content)
 }
 
 /// 解析待办行（D3：返回完整结构而非 UI 指令）
@@ -134,13 +261,91 @@ fn rescan_index(app: AppHandle, vault: State<'_, VaultState>) -> Result<(), Stri
 
 /// 为待办分配唯一 ID（D7：4-8 位十六进制，全库查重）
 #[tauri::command]
-fn allocate_todo_id(_db: State<'_, db::Handle>) -> Result<String, String> {
-    // TODO: 任务 7.1 实现
-    Err("尚未实现".into())
-    // todo::identity::generate_id(|id| {
-    //     todo::identity::id_exists(&db, id).unwrap_or(false)
-    // })
-    // .ok_or_else(|| "ID 分配失败：所有长度都已穷尽".into())
+fn allocate_todo_id(db: State<'_, db::Handle>) -> Result<String, String> {
+    todo::identity::generate_id(|id| todo::identity::id_exists(&db, id).unwrap_or(false))
+        .ok_or_else(|| "ID 分配失败：所有长度都已穷尽".into())
+}
+
+/// 替换 vault 内指定笔记的一行，交给单写者 actor 执行。
+#[tauri::command]
+async fn replace_line(
+    file_path: String,
+    line_number: usize,
+    old_content: String,
+    new_content: String,
+    vault: State<'_, VaultState>,
+    actor: State<'_, actor::Handle>,
+) -> Result<(), String> {
+    {
+        let status = vault.0.lock().map_err(|_| "vault 状态锁失败")?;
+        if let Some(reason) = status.reason() {
+            return Err(reason);
+        }
+    }
+
+    actor
+        .enqueue(actor::ChangeSet {
+            file_path,
+            op: actor::Operation::ReplaceLine {
+                line_number,
+                old_content,
+                new_content,
+            },
+            base_hash: None,
+        })
+        .await
+        .map(|_| ())
+}
+
+/// 在 vault 内新建笔记，目标已存在时由 actor 拒绝。
+#[tauri::command]
+async fn create(
+    file_path: String,
+    content: String,
+    vault: State<'_, VaultState>,
+    actor: State<'_, actor::Handle>,
+) -> Result<(), String> {
+    {
+        let status = vault.0.lock().map_err(|_| "vault 状态锁失败")?;
+        if let Some(reason) = status.reason() {
+            return Err(reason);
+        }
+    }
+
+    actor
+        .enqueue(actor::ChangeSet {
+            file_path,
+            op: actor::Operation::Create { content },
+            base_hash: None,
+        })
+        .await
+        .map(|_| ())
+}
+
+/// 提交主编辑器的字符偏移变更，基线不一致时由前端负责 rebase 后重投。
+#[tauri::command]
+async fn apply_edits(
+    file_path: String,
+    base_hash: String,
+    edits: Vec<actor::Edit>,
+    vault: State<'_, VaultState>,
+    actor: State<'_, actor::Handle>,
+) -> Result<(), String> {
+    {
+        let status = vault.0.lock().map_err(|_| "vault 状态锁失败")?;
+        if let Some(reason) = status.reason() {
+            return Err(reason);
+        }
+    }
+
+    actor
+        .enqueue(actor::ChangeSet {
+            file_path,
+            op: actor::Operation::ApplyEdits { edits },
+            base_hash: Some(base_hash),
+        })
+        .await
+        .map(|_| ())
 }
 
 /// 将分配的 ID 写回 md 文件（D6：写盘失败则整个操作失败）
@@ -160,12 +365,10 @@ async fn write_todo_id(
         }
     }
 
-    // TODO: 任务 3.3 实现 write_marker_to_line
-    let new_content = format!("{} ~{}", old_content.trim_end(), todo_id);
-    // let new_content = todo::syntax::write_marker_to_line(
-    //     &old_content,
-    //     &todo::syntax::MarkerValue::Id(todo_id),
-    // );
+    let new_content = todo::syntax::write_marker_to_line(
+        &old_content,
+        &todo::syntax::MarkerValue::Id(todo_id),
+    )?;
 
     actor
         .enqueue(actor::ChangeSet {
@@ -314,10 +517,17 @@ pub fn run() {
             retry_write,
             discard_write,
             parse_todo_line,
+            list_notes,
+            read_note,
+            parse_todo_lines,
+            hash_content,
             list_tags,
             rescan_index,
             allocate_todo_id,
-            write_todo_id
+            write_todo_id,
+            replace_line,
+            create,
+            apply_edits
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -334,9 +544,10 @@ pub fn run() {
                 // 每次写入都失败——用户至少要知道为什么用不了。
                 match db::open(&vault::db_path(&path)) {
                     Ok(conn) => {
-                        app.manage(db::Handle::new(conn));
+                        let db_handle = db::Handle::new(conn);
+                        app.manage(db_handle.clone());
                         // actor 必须在 DB 就绪后启动：它启动时就会去排空遗留队列。
-                        app.manage(actor::spawn(handle.clone(), path.clone()));
+                        app.manage(actor::spawn(handle.clone(), path.clone(), db_handle));
 
                         // 任务 8.5：在后台启动全量索引扫描，不阻塞窗口显示
                         todo::index::spawn_scan(handle.clone(), path.clone());
@@ -377,4 +588,63 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("启动 NoteIdea 失败");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "noteidea-lib-{name}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn note_path_rejects_absolute_and_parent_paths() {
+        let root = temp_dir("path-boundary");
+        assert!(note_path(&root, "../outside.md").is_err());
+        assert!(note_path(&root, "nested/../../outside.md").is_err());
+        assert!(note_path(&root, "C:\\outside.md").is_err());
+        assert_eq!(note_path(&root, "nested/note.md").unwrap(), root.join("nested/note.md"));
+    }
+
+    #[test]
+    fn collect_notes_skips_derived_directories_and_preserves_tree() {
+        let root = temp_dir("tree");
+        fs::create_dir_all(root.join("nested/deep")).unwrap();
+        fs::create_dir_all(root.join(vault::STATE_DIR)).unwrap();
+        fs::create_dir_all(root.join(vault::ASSETS)).unwrap();
+        fs::write(root.join("root.md"), "# root").unwrap();
+        fs::write(root.join("nested/deep/note.md"), "# nested").unwrap();
+        fs::write(root.join("nested/ignored.txt"), "ignored").unwrap();
+        fs::write(root.join("assets/image.md"), "ignored").unwrap();
+        fs::write(root.join(".noteidea/state.md"), "ignored").unwrap();
+
+        let tree = collect_notes(&root, &root);
+        assert!(tree.children.iter().any(|n| n.path == "root.md" && n.kind == "file"));
+        assert!(!tree.children.iter().any(|n| n.name == vault::STATE_DIR));
+        assert!(!tree.children.iter().any(|n| n.name == vault::ASSETS));
+        let nested = tree.children.iter().find(|n| n.name == "nested").unwrap();
+        let deep = nested.children.iter().find(|n| n.name == "deep").unwrap();
+        assert!(deep.children.iter().any(|n| n.path == "nested/deep/note.md"));
+        assert!(!nested.children.iter().any(|n| n.name == "ignored.txt"));
+    }
+
+    #[test]
+    fn parse_todo_lines_uses_document_line_shape() {
+        let parsed = parse_todo_lines(vec![
+            "- [ ] 交周报 @2026-08-14 18:00".into(),
+            "普通段落".into(),
+        ]);
+        assert!(parsed[0].is_some());
+        assert!(parsed[1].is_none());
+    }
 }
