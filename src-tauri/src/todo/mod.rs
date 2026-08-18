@@ -3,4 +3,5 @@
 //! 对应 spec：todo/syntax, todo/identity, todo/index
 
 pub mod syntax;
+pub mod identity;
 pub mod index;

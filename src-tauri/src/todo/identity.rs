@@ -88,10 +88,13 @@ pub async fn allocate_and_writeback(
     }
 
     // 3. 追加 ID 标记
-    let new_line = crate::todo::syntax::write_marker_to_line(
+    let new_line = match crate::todo::syntax::write_marker_to_line(
         current_line,
         &crate::todo::syntax::MarkerValue::Id(id.clone()),
-    );
+    ) {
+        Ok(line) => line,
+        Err(e) => return AllocateResult::WritebackFailed(e),
+    };
 
     // 4. 构造写回请求
     let baseline = blake3::hash(current_line.as_bytes());
@@ -220,7 +223,8 @@ mod tests {
         let new_line = crate::todo::syntax::write_marker_to_line(
             current_line,
             &crate::todo::syntax::MarkerValue::Id(id.clone()),
-        );
+        )
+        .unwrap();
 
         let baseline = blake3::hash(current_line.as_bytes());
         let cs = crate::actor::ChangeSet {

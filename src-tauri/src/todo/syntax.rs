@@ -133,6 +133,9 @@ pub struct TodoLine {
     pub markers: Vec<Marker>,
     /// 降级 token（记录位置供 UI 提示）
     pub degraded: Vec<Degraded>,
+    /// 引号屏蔽区间（含引号本身）。渲染层据此把 `"@张三"` 显示为 `@张三`：
+    /// 引号是语法的一部分，不该出现在渲染态里，但也绝不能从文本中删掉。
+    pub quoted: Vec<Span>,
 }
 
 impl TodoLine {
@@ -277,6 +280,7 @@ fn scan(line: &str, checked: bool, content_start: usize) -> TodoLine {
         },
         markers,
         degraded,
+        quoted,
     }
 }
 
@@ -599,6 +603,169 @@ fn parse_id(s: &str) -> Result<String, ()> {
     Ok(s.to_lowercase())
 }
 
+// ---------- 序列化：结构 → 规范文本 ----------
+//
+// 这是解析的反方向，同样只有 Rust 一份实现。前端可以格式化用于**显示**的文案
+// （`8月14日 18:00`），但任何要进入文档的文本都必须从这里产出。
+
+/// 序列化单个标记为规范文本（含标记字符）。
+///
+/// `None` 表示「这个值不该被写进文本」，有两种情形：
+/// - 默认值 `!once` / `^toast`：约定省略不写
+/// - 当前行内语法无法安全表达的值：含空白或引号的标签、空标签、位宽非法的 ID、
+///   `n == 0` 的周期、date 与 time 皆为 None 的时间表达式
+///
+/// 二者由 [`is_omitted_default`] 区分：前者应当删除已有标记，后者必须报错。
+/// 绝不返回一个「能写但解析回来不一样」的字符串。
+pub fn serialize_marker(value: &MarkerValue) -> Option<String> {
+    match value {
+        MarkerValue::Time(expr) => serialize_time(expr).map(|s| format!("@{s}")),
+        MarkerValue::Repeat(r) => serialize_recurrence(r).map(|s| format!("!{s}")),
+        MarkerValue::Tag(t) => serialize_tag(t).map(|s| format!("#{s}")),
+        MarkerValue::Intensity(i) => serialize_intensity(*i).map(|s| format!("^{s}")),
+        // 用 parse_id 校验而不是另写一份位宽规则，避免两处规则漂移
+        MarkerValue::Id(id) => parse_id(id).ok().map(|id| format!("~{id}")),
+    }
+}
+
+/// 该取值是否属于「约定省略不写」的默认值
+fn is_omitted_default(value: &MarkerValue) -> bool {
+    matches!(
+        value,
+        MarkerValue::Repeat(Recurrence::Once) | MarkerValue::Intensity(Intensity::Toast)
+    )
+}
+
+fn serialize_time(expr: &TimeExpr) -> Option<String> {
+    let date = match &expr.date {
+        Some(DatePart::Absolute { year, month, day }) => {
+            // 调用方可能构造出 2026-13-45 这种结构。写出去就成了解析不回来的
+            // 文本，所以在这里拦住而不是交给磁盘。
+            if *month == 0 || *month > 12 || *day == 0 || *day > days_in_month(*year, *month) {
+                return None;
+            }
+            Some(format!("{year:04}-{month:02}-{day:02}"))
+        }
+        Some(DatePart::Today) => Some("today".to_string()),
+        Some(DatePart::Tomorrow) => Some("tomorrow".to_string()),
+        None => None,
+    };
+
+    let time = match expr.time {
+        // 时刻非法时整个标记都不写。只丢掉时刻部分会把 @2026-08-14 25:00
+        // 静默变成 @2026-08-14，那是改坏了用户的意图。
+        Some((h, m)) if h > 23 || m > 59 => return None,
+        Some((h, m)) => Some(format!("{h:02}:{m:02}")),
+        None => None,
+    };
+
+    match (date, time) {
+        (Some(d), Some(t)) => Some(format!("{d} {t}")),
+        (Some(d), None) => Some(d),
+        (None, Some(t)) => Some(t),
+        // TimeExpr 的不变式是两者至少有一个，破了就是构造方的错，不写
+        (None, None) => None,
+    }
+}
+
+fn serialize_recurrence(r: &Recurrence) -> Option<String> {
+    match r {
+        Recurrence::Once => None, // 默认值，省略不写
+        Recurrence::Daily => Some("daily".to_string()),
+        Recurrence::Weekly => Some("weekly".to_string()),
+        Recurrence::Monthly => Some("monthly".to_string()),
+        Recurrence::Yearly => Some("yearly".to_string()),
+        Recurrence::Weekdays => Some("weekdays".to_string()),
+        Recurrence::EveryDays { n } if *n > 0 => Some(format!("every_{n}d")),
+        Recurrence::EveryWeeks { n } if *n > 0 => Some(format!("every_{n}w")),
+        // every_0d 解析不回来
+        Recurrence::EveryDays { .. } | Recurrence::EveryWeeks { .. } => None,
+    }
+}
+
+/// 标签目前无法表达空白：`#"我的 标签"` 会被分词器在引号处切断，
+/// 解析回来是空标签。所以含空白的标签一律拒绝，而不是写一个坏的进去。
+fn serialize_tag(tag: &str) -> Option<String> {
+    if tag.is_empty() || tag.chars().any(|c| c.is_whitespace() || c == '"') {
+        return None;
+    }
+    Some(tag.to_string())
+}
+
+fn serialize_intensity(i: Intensity) -> Option<String> {
+    match i {
+        Intensity::Toast => None, // 默认值，省略不写
+        Intensity::Ring => Some("ring".to_string()),
+        Intensity::Full => Some("full".to_string()),
+    }
+}
+
+/// 把一个标记写回到某一行：替换已有同类标记，或追加到元数据区末尾。
+///
+/// 保证只改动元数据区——正文、缩进、行尾空白、以及其他标记全部逐字节不变。
+///
+/// 默认值（`!once` / `^toast`）的语义是「取消」：已有同类标记时删除它，
+/// 本来就没有时什么都不做。
+///
+/// 标签可以重复，所以不做同类替换：同名标签已存在则原样返回，否则追加。
+pub fn write_marker_to_line(line: &str, value: &MarkerValue) -> Result<String, String> {
+    if line.trim().is_empty() {
+        return Err("空行无法承载标记".to_string());
+    }
+
+    let parsed = parse(line).unwrap_or_else(|| parse_fragment(line));
+    let kind = value.kind();
+
+    let existing = if kind == MarkerKind::Tag {
+        None
+    } else {
+        parsed
+            .markers
+            .iter()
+            .find(|m| m.value.kind() == kind)
+            .map(|m| m.span)
+    };
+
+    match (serialize_marker(value), existing) {
+        // 写不出来又不是默认值：可见地失败，绝不写一个解析不回来的字符串
+        (None, _) if !is_omitted_default(value) => {
+            Err(format!("{kind:?} 的取值无法用行内语法表达，拒绝写入"))
+        }
+        (None, Some(span)) => Ok(remove_span(line, span)),
+        (None, None) => Ok(line.to_string()),
+        (Some(text), Some(span)) => Ok(format!(
+            "{}{}{}",
+            &line[..span.start],
+            text,
+            &line[span.end + 1..]
+        )),
+        (Some(text), None) => {
+            if kind == MarkerKind::Tag && parsed.markers.iter().any(|m| m.value == *value) {
+                return Ok(line.to_string()); // 同名标签已在，不重复追加
+            }
+            Ok(append_marker(line, &text))
+        }
+    }
+}
+
+/// 删除某个标记，连带它前面那一个分隔空格
+fn remove_span(line: &str, span: Span) -> String {
+    let mut start = span.start;
+    if start > 0 && line.as_bytes()[start - 1] == b' ' {
+        start -= 1;
+    }
+    format!("{}{}", &line[..start], &line[span.end + 1..])
+}
+
+/// 追加标记到元数据区末尾。
+///
+/// 插入点取最后一个非空白字节之后，而不是行尾——这样行尾原有的空白留在
+/// 标记后面，仍然逐字节不变。用 `trim_end()` 直接拼接会吃掉它们。
+fn append_marker(line: &str, text: &str) -> String {
+    let insert_at = line.trim_end().len();
+    format!("{} {}{}", &line[..insert_at], text, &line[insert_at..])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -748,5 +915,319 @@ mod tests {
             }
             _ => panic!("expected time"),
         }
+    }
+
+    #[test]
+    fn test_quoted_ranges_are_exposed_for_rendering() {
+        // 渲染层要把 `"@张三"` 显示成 `@张三`，得知道引号在哪；
+        // 让它自己找引号等于在前端重写一遍分词器，已被否决。
+        let line = r#"- [ ] 联系 "@张三" 确认"#;
+        let result = parse(line).unwrap();
+        assert_eq!(result.quoted.len(), 1);
+        let q = result.quoted[0];
+        assert_eq!(&line[q.start..=q.end], r#""@张三""#);
+        assert!(result.markers.is_empty(), "引号内的 @ 不该成为标记");
+    }
+
+    #[test]
+    fn test_unclosed_quote_exposes_no_range() {
+        let result = parse(r#"- [ ] 他说 "没关系"#).unwrap();
+        assert!(result.quoted.is_empty(), "未闭合引号不产生屏蔽区间");
+    }
+
+    #[test]
+    fn test_json_shape_is_what_frontend_expects() {
+        // 前端 decoration 直接吃这个 JSON。形状变了就是静默的渲染错误，
+        // 所以把契约钉在测试里，而不是靠两边各自记得。
+        let line = "- [ ] 交周报 @2026-08-14 18:00 !every_3d #工作 ^ring ~a3f9";
+        let parsed = parse(line).unwrap();
+        let json = serde_json::to_value(&parsed).unwrap();
+
+        assert_eq!(json["checked"], serde_json::json!(false));
+
+        let by_kind = |k: &str| -> serde_json::Value {
+            json["markers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|m| m["value"]["kind"] == k)
+                .unwrap()["value"]
+                .clone()
+        };
+
+        // 时间：date 是内部带标签的对象，time 是 [时, 分] 数组
+        assert_eq!(
+            by_kind("time")["value"],
+            serde_json::json!({
+                "date": { "kind": "absolute", "year": 2026, "month": 8, "day": 14 },
+                "time": [18, 0]
+            })
+        );
+
+        // 重复：单个对象（不是数组），every_Nd 的数字在 `n` 上
+        assert_eq!(
+            by_kind("repeat")["value"],
+            serde_json::json!({ "kind": "every_days", "n": 3 })
+        );
+
+        // 标签：裸字符串
+        assert_eq!(by_kind("tag")["value"], serde_json::json!("工作"));
+
+        // 强度：裸字符串（不是 { kind: ... }）
+        assert_eq!(by_kind("intensity")["value"], serde_json::json!("ring"));
+
+        // ID：裸字符串
+        assert_eq!(by_kind("id")["value"], serde_json::json!("a3f9"));
+    }
+
+    // ---------- 0.3 序列化往返一致 ----------
+
+    fn time(date: Option<DatePart>, t: Option<(u32, u32)>) -> MarkerValue {
+        MarkerValue::Time(TimeExpr { date, time: t })
+    }
+
+    fn abs(year: u32, month: u32, day: u32) -> Option<DatePart> {
+        Some(DatePart::Absolute { year, month, day })
+    }
+
+    /// 序列化 → 放进一行 → 解析回来，必须得到等价结构。
+    /// 用 parse（真实的待办行形态）而不是 parse_fragment，因为写回的对象是文档里的行。
+    fn assert_round_trip(value: MarkerValue) {
+        let text = serialize_marker(&value)
+            .unwrap_or_else(|| panic!("{value:?} 应当可序列化"));
+        let line = format!("- [ ] 正文 {text}");
+        let parsed = parse(&line).unwrap_or_else(|| panic!("{line:?} 应当仍是待办行"));
+        assert_eq!(
+            parsed.markers.len(),
+            1,
+            "{line:?} 应当只解析出一个标记，实到 {:?}（降级 {:?}）",
+            parsed.markers,
+            parsed.degraded
+        );
+        assert_eq!(parsed.markers[0].value, value, "往返后结构变了：{line:?}");
+        assert_eq!(
+            &line[parsed.markers[0].span.start..=parsed.markers[0].span.end],
+            text,
+            "span 未覆盖完整标记文本"
+        );
+    }
+
+    #[test]
+    fn test_round_trip_time() {
+        assert_round_trip(time(abs(2026, 8, 14), Some((18, 0))));
+        assert_round_trip(time(abs(2026, 8, 14), None));
+        assert_round_trip(time(None, Some((18, 0))));
+        assert_round_trip(time(None, Some((0, 0))));
+        assert_round_trip(time(None, Some((23, 59))));
+        assert_round_trip(time(Some(DatePart::Today), None));
+        assert_round_trip(time(Some(DatePart::Today), Some((20, 0))));
+        assert_round_trip(time(Some(DatePart::Tomorrow), None));
+        assert_round_trip(time(Some(DatePart::Tomorrow), Some((9, 5))));
+        // 闰年 2 月 29 日
+        assert_round_trip(time(abs(2028, 2, 29), None));
+    }
+
+    #[test]
+    fn test_round_trip_time_pads_zeroes() {
+        // 补零是规范格式的一部分：不补零解析不回来
+        let text = serialize_marker(&time(abs(2026, 1, 2), Some((9, 5)))).unwrap();
+        assert_eq!(text, "@2026-01-02 09:05");
+    }
+
+    #[test]
+    fn test_round_trip_repeat() {
+        for r in [
+            Recurrence::Daily,
+            Recurrence::Weekly,
+            Recurrence::Monthly,
+            Recurrence::Yearly,
+            Recurrence::Weekdays,
+            Recurrence::EveryDays { n: 3 },
+            Recurrence::EveryDays { n: 1 },
+            Recurrence::EveryWeeks { n: 2 },
+        ] {
+            assert_round_trip(MarkerValue::Repeat(r));
+        }
+    }
+
+    #[test]
+    fn test_round_trip_tag_and_intensity_and_id() {
+        assert_round_trip(MarkerValue::Tag("工作".to_string()));
+        assert_round_trip(MarkerValue::Tag("work".to_string()));
+        assert_round_trip(MarkerValue::Intensity(Intensity::Ring));
+        assert_round_trip(MarkerValue::Intensity(Intensity::Full));
+        assert_round_trip(MarkerValue::Id("a3f9".to_string()));
+        assert_round_trip(MarkerValue::Id("deadbeef".to_string()));
+    }
+
+    #[test]
+    fn test_defaults_are_omitted() {
+        // !once / ^toast 约定不写
+        assert_eq!(serialize_marker(&MarkerValue::Repeat(Recurrence::Once)), None);
+        assert_eq!(
+            serialize_marker(&MarkerValue::Intensity(Intensity::Toast)),
+            None
+        );
+    }
+
+    #[test]
+    fn test_unrepresentable_values_refuse_to_serialize() {
+        // 全部是「写出去就解析不回来」的值，一律不写
+        let bad = [
+            time(None, None),                       // 破了 TimeExpr 不变式
+            time(abs(2026, 13, 1), None),           // 月份越界
+            time(abs(2026, 2, 30), None),           // 2 月没有 30 日
+            time(abs(2027, 2, 29), None),           // 非闰年
+            time(abs(2026, 8, 14), Some((25, 0))),  // 小时越界
+            time(abs(2026, 8, 14), Some((12, 60))), // 分钟越界
+            MarkerValue::Repeat(Recurrence::EveryDays { n: 0 }),
+            MarkerValue::Repeat(Recurrence::EveryWeeks { n: 0 }),
+            MarkerValue::Tag(String::new()),
+            MarkerValue::Tag("我的 标签".to_string()),
+            MarkerValue::Tag("带\"引号".to_string()),
+            MarkerValue::Id("xy".to_string()),        // 太短
+            MarkerValue::Id("0123456789".to_string()), // 太长
+            MarkerValue::Id("zzzz".to_string()),      // 非十六进制
+        ];
+        for value in bad {
+            assert_eq!(
+                serialize_marker(&value),
+                None,
+                "{value:?} 不该被序列化成文本"
+            );
+        }
+    }
+
+    #[test]
+    fn test_id_is_normalized_to_lowercase() {
+        // 大写十六进制合法但非规范形态，写回时统一小写
+        assert_eq!(
+            serialize_marker(&MarkerValue::Id("A3F9".to_string())).as_deref(),
+            Some("~a3f9")
+        );
+    }
+
+    // ---------- 0.4 写回只改元数据区 ----------
+
+    #[test]
+    fn test_write_appends_when_absent() {
+        let out = write_marker_to_line(
+            "- [ ] 交周报",
+            &time(abs(2026, 8, 14), Some((18, 0))),
+        )
+        .unwrap();
+        assert_eq!(out, "- [ ] 交周报 @2026-08-14 18:00");
+    }
+
+    #[test]
+    fn test_write_replaces_same_kind_in_place() {
+        // 时间标记横跨两个 token，替换成只有时刻的形态后其余部分必须逐字节不变
+        let line = "- [ ] 交周报 @2026-08-14 18:00 !daily ^ring ~a3f9";
+        let out = write_marker_to_line(line, &time(None, Some((9, 30)))).unwrap();
+        assert_eq!(out, "- [ ] 交周报 @09:30 !daily ^ring ~a3f9");
+    }
+
+    #[test]
+    fn test_write_preserves_indent_and_body_bytes() {
+        // 缩进、正文里的 @ 与 #、以及其他标记都不该被碰
+        let line = "  - [x] 联系 zhang@corp.com 见 #C-3 号楼 !weekly";
+        let out = write_marker_to_line(line, &MarkerValue::Intensity(Intensity::Full)).unwrap();
+        assert_eq!(out, format!("{line} ^full"));
+    }
+
+    #[test]
+    fn test_write_preserves_trailing_whitespace() {
+        // 追加点取最后一个非空白字节之后，行尾原有空白留在标记后面
+        let out = write_marker_to_line("- [ ] 交周报   ", &MarkerValue::Tag("工作".to_string()))
+            .unwrap();
+        assert_eq!(out, "- [ ] 交周报 #工作   ");
+    }
+
+    #[test]
+    fn test_write_preserves_crlf_carriage_return() {
+        // CRLF 文件按 \n 切行后每行尾部带 \r，它必须留在行尾而不是被标记顶开
+        let out =
+            write_marker_to_line("- [ ] 交周报\r", &MarkerValue::Repeat(Recurrence::Daily)).unwrap();
+        assert_eq!(out, "- [ ] 交周报 !daily\r");
+    }
+
+    #[test]
+    fn test_write_default_removes_existing_marker() {
+        // ^toast / !once 的语义是「取消」：删掉已有标记连带它前面那个分隔空格
+        let out = write_marker_to_line(
+            "- [ ] 交周报 @2026-08-14 ^ring",
+            &MarkerValue::Intensity(Intensity::Toast),
+        )
+        .unwrap();
+        assert_eq!(out, "- [ ] 交周报 @2026-08-14");
+
+        let out = write_marker_to_line(
+            "- [ ] 交周报 !daily ~a3f9",
+            &MarkerValue::Repeat(Recurrence::Once),
+        )
+        .unwrap();
+        assert_eq!(out, "- [ ] 交周报 ~a3f9");
+    }
+
+    #[test]
+    fn test_write_default_on_absent_marker_is_noop() {
+        let line = "- [ ] 交周报 @2026-08-14";
+        assert_eq!(
+            write_marker_to_line(line, &MarkerValue::Intensity(Intensity::Toast)).unwrap(),
+            line
+        );
+        assert_eq!(
+            write_marker_to_line(line, &MarkerValue::Repeat(Recurrence::Once)).unwrap(),
+            line
+        );
+    }
+
+    #[test]
+    fn test_write_tag_appends_and_dedups() {
+        // 标签可以多个，所以不做同类替换
+        let out =
+            write_marker_to_line("- [ ] 交周报 #工作", &MarkerValue::Tag("紧急".to_string()))
+                .unwrap();
+        assert_eq!(out, "- [ ] 交周报 #工作 #紧急");
+        // 同名已在则原样返回
+        assert_eq!(
+            write_marker_to_line(&out, &MarkerValue::Tag("工作".to_string())).unwrap(),
+            out
+        );
+    }
+
+    #[test]
+    fn test_write_works_on_fragment_without_prefix() {
+        // 速记条的真实输入形态：没有 GFM 前缀，写回同样要成立
+        let out = write_marker_to_line("买牛奶 @2026-08-15 18:00", &time(None, Some((7, 0))))
+            .unwrap();
+        assert_eq!(out, "买牛奶 @07:00");
+    }
+
+    #[test]
+    fn test_write_refuses_unrepresentable_value() {
+        // 宁可可见地失败，也不写一个解析不回来的字符串
+        let line = "- [ ] 交周报 @2026-08-14";
+        assert!(write_marker_to_line(line, &MarkerValue::Tag("我的 标签".to_string())).is_err());
+        assert!(write_marker_to_line(line, &time(abs(2026, 2, 30), None)).is_err());
+        assert!(write_marker_to_line(line, &MarkerValue::Id("zz".to_string())).is_err());
+    }
+
+    #[test]
+    fn test_write_refuses_empty_line() {
+        assert!(write_marker_to_line("", &MarkerValue::Repeat(Recurrence::Daily)).is_err());
+        assert!(write_marker_to_line("   ", &MarkerValue::Repeat(Recurrence::Daily)).is_err());
+    }
+
+    #[test]
+    fn test_write_then_parse_round_trip() {
+        // 写回的结果必须能被解析器读回同一个值（写回 × 解析的联合不变式）
+        let line = "- [ ] 交周报";
+        let value = time(Some(DatePart::Tomorrow), Some((9, 0)));
+        let out = write_marker_to_line(line, &value).unwrap();
+        let parsed = parse(&out).unwrap();
+        assert_eq!(parsed.markers.len(), 1);
+        assert_eq!(parsed.markers[0].value, value);
+        assert_eq!(&out[parsed.content.start..=parsed.content.end], "交周报");
     }
 }
