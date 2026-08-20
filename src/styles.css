@@ -386,6 +386,44 @@ main.workspace {
   color: var(--muted);
 }
 
+/* 行内代码：藏掉反引号，靠底色表明它是代码 */
+.ni-inline-code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: rgba(74, 222, 128, 0.1);
+  color: #6ee79b;
+}
+
+/* 围栏代码块：背景 + 左边条把边界画出来，因此 ``` 可以放心藏掉 */
+.ni-code-block {
+  background: rgba(122, 162, 247, 0.07);
+  border-left: 2px solid rgba(122, 162, 247, 0.3);
+}
+
+.ni-code-first {
+  border-top-left-radius: 6px;
+  border-top-right-radius: 6px;
+  padding-top: 2px;
+}
+
+.ni-code-last {
+  border-bottom-left-radius: 6px;
+  border-bottom-right-radius: 6px;
+  padding-bottom: 2px;
+}
+
+.ni-code-lang {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: rgba(122, 162, 247, 0.18);
+  color: #9db8fa;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  font-size: 10px;
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+}
+
 .ni-link {
   color: #7aa2f7;
   text-decoration: underline;

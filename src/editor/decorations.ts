@@ -489,6 +489,28 @@ const headingLine = [1, 2, 3, 4, 5, 6].map((n) =>
 const quoteLine = Decoration.line({ class: 'ni-quote' });
 const strikeMark = Decoration.mark({ class: 'ni-strike' });
 const linkTextMark = Decoration.mark({ class: 'ni-link' });
+const inlineCodeMark = Decoration.mark({ class: 'ni-inline-code' });
+const codeBlockLine = Decoration.line({ class: 'ni-code-block' });
+const codeBlockFirst = Decoration.line({ class: 'ni-code-first' });
+const codeBlockLast = Decoration.line({ class: 'ni-code-last' });
+
+/** 围栏代码块的语言标签（`​```http` 里的 http）。 */
+class LangBadgeWidget extends WidgetType {
+  constructor(private readonly lang: string) {
+    super();
+  }
+
+  eq(other: LangBadgeWidget) {
+    return other.lang === this.lang;
+  }
+
+  toDOM() {
+    const badge = document.createElement('span');
+    badge.className = 'ni-code-lang';
+    badge.textContent = this.lang;
+    return badge;
+  }
+}
 
 /** 隐藏范围，并顺带吃掉紧跟其后的一个空格（`# ` / `> ` 留着空格会顶出缩进）。 */
 function hideWithTrailingSpace(canvas: LineCanvas, view: EditorView, from: number, to: number) {
@@ -496,11 +518,38 @@ function hideWithTrailingSpace(canvas: LineCanvas, view: EditorView, from: numbe
   canvas.replace(from, next === ' ' ? to + 1 : to, hidden);
 }
 
-function decorateMarkdown(canvas: LineCanvas, view: EditorView, lineFrom: number, lineTo: number) {
+/**
+ * @param rendered 该行是否处于渲染态（未被选区触及）。
+ *
+ * 代码块的背景与边框**不受它影响**：那是块级样式而非语法符号，光标一进去
+ * 就让整个代码块散架，比看见 ``` 更难受。
+ */
+function decorateMarkdown(
+  canvas: LineCanvas,
+  view: EditorView,
+  lineFrom: number,
+  lineTo: number,
+  rendered: boolean,
+) {
   syntaxTree(view.state).iterate({
     from: lineFrom,
     to: lineTo,
     enter(node) {
+      if (node.name === 'FencedCode') {
+        canvas.line(lineFrom, codeBlockLine);
+        // 首尾行拿圆角与内边距，代码块的起止因此始终可见——这也是能放心
+        // 藏掉 ``` 的前提。
+        if (node.from >= lineFrom && node.from <= lineTo) {
+          canvas.line(lineFrom, codeBlockFirst);
+        }
+        if (node.to >= lineFrom && node.to <= lineTo) {
+          canvas.line(lineFrom, codeBlockLast);
+        }
+        return;
+      }
+
+      if (!rendered) return;
+
       switch (node.name) {
         case 'ATXHeading1':
         case 'ATXHeading2':
@@ -524,12 +573,24 @@ function decorateMarkdown(canvas: LineCanvas, view: EditorView, lineFrom: number
         case 'LinkMark':
           canvas.replace(node.from, node.to, hidden);
           break;
+        case 'InlineCode':
+          // 先上底色再藏反引号：mark 会避开已被 replace 占用的区间，顺序反了就落不下
+          canvas.mark(node.from, node.to, inlineCodeMark);
+          break;
         case 'CodeMark':
-          // 只藏行内代码的反引号；围栏代码块的 ``` 藏掉会留下一行空白，
-          // 而且看不出代码块从哪开始。
-          if (node.node.parent?.name === 'InlineCode') {
-            canvas.replace(node.from, node.to, hidden);
-          }
+          // 行内代码的反引号、围栏代码块的 ``` 都藏掉。
+          // 藏 ``` 是安全的：块背景与首尾圆角已经把边界画出来了。
+          canvas.replace(node.from, node.to, hidden);
+          break;
+        case 'CodeInfo':
+          // `​```http` 的语言名换成小徽标，比一行光秃秃的 ``` 有用
+          canvas.replace(
+            node.from,
+            node.to,
+            Decoration.replace({
+              widget: new LangBadgeWidget(view.state.doc.sliceString(node.from, node.to)),
+            }),
+          );
           break;
         case 'URL': {
           // 只有 `[文字](地址)` 这种带文字的才收起地址；裸 URL / 自动链接
@@ -570,11 +631,11 @@ function buildDecorations(view: EditorView, queue: ParseQueue): DecorationSet {
     let pos = visible.from;
     while (pos <= visible.to) {
       const line = view.state.doc.lineAt(pos);
+      const canvas = new LineCanvas(out);
+      const rendered = !touchedBySelection(view, line.from, line.to);
 
       // 光标/选区所在行显示原文，连解析都不必等
-      if (!touchedBySelection(view, line.from, line.to)) {
-        const canvas = new LineCanvas(out);
-
+      if (rendered) {
         // chip 先占位：待办标记比 markdown 语法更要紧，冲突时它赢。
         const parsed = cache.get(line.text);
         if (parsed === undefined) {
@@ -583,9 +644,10 @@ function buildDecorations(view: EditorView, queue: ParseQueue): DecorationSet {
         } else if (parsed !== null) {
           decorateTodoLine(canvas, line.from, line.text, parsed);
         }
-
-        decorateMarkdown(canvas, view, line.from, line.to);
       }
+
+      // 即使在选区行也要走一趟：代码块的块级样式与选区无关
+      decorateMarkdown(canvas, view, line.from, line.to, rendered);
 
       if (line.to + 1 <= pos) break; // 防御：空文档时不空转
       pos = line.to + 1;
@@ -612,7 +674,18 @@ export const todoChips = ViewPlugin.fromClass(
       const parsedArrived = update.transactions.some((tr) =>
         tr.effects.some((e) => e.is(parsedEffect)),
       );
-      if (update.docChanged || update.selectionSet || update.viewportChanged || parsedArrived) {
+      // 语法树变了也要重算：语言包是按需异步加载的（```rust 要等 lang-rust
+      // 到位），大文件的 markdown 树本身也是渐进解析出来的。不看这一条，
+      // 首屏那一版不完整的树会一直留在屏幕上。
+      const treeChanged = syntaxTree(update.startState) !== syntaxTree(update.state);
+
+      if (
+        update.docChanged ||
+        update.selectionSet ||
+        update.viewportChanged ||
+        parsedArrived ||
+        treeChanged
+      ) {
         this.decorations = buildDecorations(update.view, this.queue);
       }
     }

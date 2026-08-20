@@ -9,6 +9,7 @@ import {
 } from '@codemirror/view';
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown';
+import { languages } from '@codemirror/language-data';
 import { syntaxHighlighting, HighlightStyle, indentOnInput } from '@codemirror/language';
 import { tags } from '@lezer/highlight';
 import { todoChips, markerInteraction, flushRequest } from './decorations';
@@ -38,16 +39,35 @@ const darkTheme = EditorView.theme(
 );
 
 const mdHighlight = HighlightStyle.define([
+  // ---- markdown 自身 ----
   { tag: tags.heading, color: '#f5c542', fontWeight: '600' },
   { tag: tags.emphasis, fontStyle: 'italic' },
   { tag: tags.strong, fontWeight: '700' },
   { tag: tags.monospace, color: '#4ade80' },
   { tag: tags.link, color: '#7aa2f7' },
   { tag: tags.url, color: '#7aa2f7' },
-  { tag: tags.comment, color: '#6f6885' },
   { tag: tags.quote, color: '#9a94ad', fontStyle: 'italic' },
   { tag: tags.processingInstruction, color: '#9a94ad' },
   { tag: tags.meta, color: '#9a94ad' },
+
+  // ---- 围栏代码块内的嵌套语言 ----
+  // markdown 本身不产出这些 tag，所以不会和上面打架。
+  { tag: tags.comment, color: '#6f6885', fontStyle: 'italic' },
+  { tag: [tags.keyword, tags.modifier, tags.controlKeyword], color: '#bb9af7' },
+  { tag: [tags.string, tags.special(tags.string)], color: '#9ece6a' },
+  { tag: [tags.number, tags.bool, tags.null, tags.atom], color: '#ff9e64' },
+  { tag: [tags.escape, tags.regexp], color: '#b4f9f8' },
+  { tag: [tags.typeName, tags.className, tags.namespace], color: '#2ac3de' },
+  { tag: [tags.function(tags.variableName), tags.function(tags.propertyName)], color: '#7aa2f7' },
+  { tag: tags.propertyName, color: '#7dcfff' },
+  { tag: tags.definition(tags.variableName), color: '#e8e6f0' },
+  { tag: tags.variableName, color: '#c8c3d8' },
+  { tag: [tags.operator, tags.operatorKeyword], color: '#89ddff' },
+  { tag: [tags.punctuation, tags.separator, tags.bracket], color: '#8a84a0' },
+  { tag: tags.tagName, color: '#f7768e' },
+  { tag: tags.attributeName, color: '#bb9af7' },
+  { tag: tags.attributeValue, color: '#9ece6a' },
+  { tag: tags.invalid, color: '#f87171' },
 ]);
 
 export interface NoteEditor {
@@ -71,7 +91,10 @@ export function createNoteEditor(
     highlightActiveLine(),
     keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
     // GFM base：任务列表、删除线、表格都要它，commonmark 默认不带。
-    markdown({ base: markdownLanguage }),
+    // codeLanguages：围栏代码块按 ```lang 挂对应语言的解析器，语言包按需
+    // 动态加载（143 种，含只存在于 legacy-modes 的 http / nginx 之类），
+    // 所以主 chunk 不会因此变大。
+    markdown({ base: markdownLanguage, codeLanguages: languages }),
     indentOnInput(),
     syntaxHighlighting(mdHighlight),
     todoChips,
