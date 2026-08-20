@@ -9,17 +9,18 @@
 // 转换只在 `byteToUtf16` 这一处做，其余地方一律已是 CM6 坐标。
 
 import { invoke } from '@tauri-apps/api/core';
-import { StateEffect, type Range } from '@codemirror/state';
+import { listen } from '@tauri-apps/api/event';
+import { Facet, StateEffect, type Range } from '@codemirror/state';
 import { syntaxTree } from '@codemirror/language';
 import {
   Decoration,
+  EditorView,
   ViewPlugin,
   WidgetType,
   type DecorationSet,
-  type EditorView,
   type ViewUpdate,
 } from '@codemirror/view';
-import type { Intensity, Recurrence, TimeExpr, TodoLine } from '../types/todo';
+import type { Intensity, MarkerValue, Recurrence, TimeExpr, TodoLine } from '../types/todo';
 
 // ---------- 解析结果缓存（design E4） ----------
 //
@@ -198,8 +199,10 @@ class ChipWidget extends WidgetType {
     const chip = document.createElement('span');
     chip.className = `ni-chip ni-chip-${this.variant}`;
     // 悬浮显示原始语法：渲染态看不见原文时，这是最快的自查手段。
-    chip.title = this.raw;
+    chip.title = `${this.raw}（点击修改）`;
     chip.dataset.raw = this.raw;
+    // ~id 不可点：它是身份锚点，不该由用户随手改
+    if (this.variant !== 'id') chip.dataset.kind = this.variant;
 
     if (this.icon !== '') {
       const icon = document.createElement('span');
@@ -319,6 +322,155 @@ function decorateTodoLine(
   }
 }
 
+// ---------- 交互：复选框与 chip（design E7） ----------
+//
+// 所有修改都走编辑缓冲，不另开写路径：同一行若同时存在「缓冲里的版本」和
+// 「被 actor 直接改过的磁盘版本」，就多一类竞态，而省下的只是一次缓冲更新。
+
+/** 宿主注入的「立即落盘」回调。点复选框、改 chip 是明确动作，不等 800ms。 */
+export const flushRequest = Facet.define<() => void, () => void>({
+  combine: (values) => values[0] ?? (() => {}),
+});
+
+/**
+ * 求两段文本的最小差异区间。
+ *
+ * Rust 那边返回的是**整行新文本**（语法规则只有一份，前端不该自己拼），
+ * 但直接整行替换会让 ChangeSet 里塞满没改过的字节。这里收敛成一处连续
+ * 改动，既满足「该行其余字节不变」，也让 apply_edits 的 payload 保持精简。
+ */
+export function minimalChange(
+  oldText: string,
+  newText: string,
+): { from: number; to: number; insert: string } | null {
+  if (oldText === newText) return null;
+
+  const max = Math.min(oldText.length, newText.length);
+  let start = 0;
+  while (start < max && oldText[start] === newText[start]) start += 1;
+
+  let endOld = oldText.length;
+  let endNew = newText.length;
+  while (endOld > start && endNew > start && oldText[endOld - 1] === newText[endNew - 1]) {
+    endOld -= 1;
+    endNew -= 1;
+  }
+
+  // 别把代理对劈成两半：边界落在低位代理上就各退一格。
+  const isLow = (s: string, i: number) => {
+    const c = s.charCodeAt(i);
+    return c >= 0xdc00 && c <= 0xdfff;
+  };
+  if (start > 0 && start < oldText.length && isLow(oldText, start)) start -= 1;
+  if (endOld < oldText.length && isLow(oldText, endOld)) endOld += 1;
+  if (endNew < newText.length && isLow(newText, endNew)) endNew += 1;
+
+  return { from: start, to: endOld, insert: newText.slice(start, endNew) };
+}
+
+/** 把 Rust 算出的新行文本落进缓冲，并立即请求落盘。 */
+function applyNewLineText(view: EditorView, lineFrom: number, oldText: string, newText: string) {
+  const change = minimalChange(oldText, newText);
+  if (change === null) return;
+  view.dispatch({
+    changes: {
+      from: lineFrom + change.from,
+      to: lineFrom + change.to,
+      insert: change.insert,
+    },
+  });
+  view.state.facet(flushRequest)();
+}
+
+class CheckboxWidget extends WidgetType {
+  constructor(private readonly checked: boolean) {
+    super();
+  }
+
+  eq(other: CheckboxWidget) {
+    return other.checked === this.checked;
+  }
+
+  toDOM() {
+    const box = document.createElement('span');
+    box.className = `ni-checkbox${this.checked ? ' ni-checkbox-on' : ''}`;
+    box.textContent = this.checked ? '✓' : '';
+    box.title = this.checked ? '点击标记为未完成' : '点击标记为完成';
+    return box;
+  }
+
+  ignoreEvent() {
+    return false; // 让点击事件传到 domEventHandlers
+  }
+}
+
+async function toggleCheckboxAt(view: EditorView, pos: number) {
+  const line = view.state.doc.lineAt(pos);
+  try {
+    const next = await invoke<string>('toggle_checkbox', { line: line.text });
+    applyNewLineText(view, line.from, line.text, next);
+  } catch {
+    // 不是待办行等情况：什么都不做，绝不猜着改文本
+  }
+}
+
+// ---------- chip 点击 → 独立选择器窗口 ----------
+//
+// 选中结果是广播，速记条也在听，所以每次打开都带一个请求 id，回来时对不上
+// 就不是自己那一次。窗口只有一个，同一时刻只可能有一个待处理请求。
+
+let pendingEdit: { view: EditorView; lineFrom: number; requestId: string } | null = null;
+let pickerSeq = 0;
+
+async function openChipPicker(view: EditorView, pos: number, kind: string) {
+  const line = view.state.doc.lineAt(pos);
+  pickerSeq += 1;
+  const requestId = `editor-${pickerSeq}`;
+  pendingEdit = { view, lineFrom: line.from, requestId };
+  try {
+    await invoke('open_marker_picker', { kind, requestId });
+  } catch {
+    pendingEdit = null;
+  }
+}
+
+void listen<{ requestId: string; value: MarkerValue }>('marker-picker:selected', async (event) => {
+  const target = pendingEdit;
+  if (target === null || event.payload.requestId !== target.requestId) return;
+  pendingEdit = null;
+
+  const { view, lineFrom } = target;
+  // 行号可能已经漂了（比如期间来了远端变更），重新按当前文档取这一行。
+  if (lineFrom > view.state.doc.length) return;
+  const line = view.state.doc.lineAt(lineFrom);
+
+  try {
+    let next = await invoke<string>('write_marker', {
+      line: line.text,
+      value: event.payload.value,
+    });
+
+    // 6.6：设了提醒却还没有 ~id 的待办，顺手分配一个。ID 是 md 行与 DB 行的
+    // 映射锚点，没有它提醒引擎认不出这条待办。和标记写在同一次缓冲变更里，
+    // 落盘时是一次 apply_edits，不会出现「有提醒但没 ID」的中间态。
+    if (event.payload.value.kind === 'time') {
+      const parsed = await invoke<TodoLine | null>('parse_todo_line', { text: next });
+      const hasId = parsed?.markers.some((m) => m.value.kind === 'id') ?? false;
+      if (parsed !== null && !hasId) {
+        const id = await invoke<string>('allocate_todo_id');
+        next = await invoke<string>('write_marker', {
+          line: next,
+          value: { kind: 'id', value: id },
+        });
+      }
+    }
+
+    applyNewLineText(view, line.from, line.text, next);
+  } catch (err) {
+    console.error('写入标记失败:', err);
+  }
+});
+
 /** 该行是否与任一选区相交（相交则显示原始语法，design E6）。 */
 function touchedBySelection(view: EditorView, from: number, to: number): boolean {
   return view.state.selection.ranges.some((r) => r.from <= to && r.to >= from);
@@ -391,6 +543,16 @@ function decorateMarkdown(canvas: LineCanvas, view: EditorView, lineFrom: number
         case 'Strikethrough':
           canvas.mark(node.from, node.to, strikeMark);
           break;
+        case 'TaskMarker': {
+          // GFM 的 `[ ]` / `[x]`。换成可点的方块，点击走 Rust 只改那一个字符。
+          const checked = view.state.doc.sliceString(node.from, node.to).toLowerCase() === '[x]';
+          canvas.replace(
+            node.from,
+            node.to,
+            Decoration.replace({ widget: new CheckboxWidget(checked) }),
+          );
+          break;
+        }
         case 'Link':
           canvas.mark(node.from, node.to, linkTextMark);
           break;
@@ -461,3 +623,32 @@ export const todoChips = ViewPlugin.fromClass(
   },
   { decorations: (v) => v.decorations },
 );
+
+/**
+ * 复选框点击。
+ *
+ * 用 mousedown 而不是 click：click 之前光标已经落进这一行，该行会立刻
+ * 切回原始语法、复选框 widget 随之消失，点击就落空了。
+ */
+export const markerInteraction = EditorView.domEventHandlers({
+  mousedown(event, view) {
+    const target = event.target as HTMLElement | null;
+
+    const box = target?.closest('.ni-checkbox');
+    if (box !== null && box !== undefined) {
+      void toggleCheckboxAt(view, view.posAtDOM(box));
+      return true; // 阻止默认行为，光标不进入该行
+    }
+
+    const chip = target?.closest<HTMLElement>('.ni-chip');
+    if (chip !== null && chip !== undefined) {
+      const kind = chip.dataset.kind;
+      if (kind !== undefined) {
+        void openChipPicker(view, view.posAtDOM(chip), kind);
+        return true;
+      }
+    }
+
+    return false;
+  },
+});

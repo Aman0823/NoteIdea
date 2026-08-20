@@ -11,6 +11,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 pub const QUICK: &str = "quick";
 pub const MAIN: &str = "main";
+pub const TIME_PICKER: &str = "time-picker";
 
 /// 速记条延迟测量状态。
 #[derive(Default)]
@@ -119,24 +120,32 @@ pub fn resize_quick(app: AppHandle, height: f64) {
     }
 }
 
-/// 打开时间选择器窗口（独立窗口，无边框，始终置顶）
+/// 打开标记选择器窗口（独立窗口，始终置顶）。
+///
+/// `kind` 决定选什么（time / repeat / tag / intensity），`request_id` 用来
+/// 把结果送回正确的发起方——选中结果是**广播**，速记条和主编辑器都收得到，
+/// 不带 id 的话在编辑器里点 chip 会连速记条一起改掉。
+///
+/// 参数经 URL query 传给页面，不再另开一条 IPC 通道。
 #[tauri::command]
-pub async fn open_time_picker(app: AppHandle) {
-    println!("[time-picker] open_time_picker 被调用");
-
-    // 如果已存在则显示并聚焦
-    if let Some(win) = app.get_webview_window("time-picker") {
-        println!("[time-picker] 窗口已存在，显示并聚焦");
-        let _ = win.show();
-        let _ = win.set_focus();
-        return;
+pub async fn open_marker_picker(app: AppHandle, kind: String, request_id: String) {
+    // 复用同一个窗口：换了发起方就得换 query，所以先关掉旧的再建。
+    if let Some(win) = app.get_webview_window(TIME_PICKER) {
+        let _ = win.close();
     }
 
-    println!("[time-picker] 开始创建窗口");
     use tauri::{WebviewUrl, WebviewWindowBuilder};
 
-    let builder = WebviewWindowBuilder::new(&app, "time-picker", WebviewUrl::App("time-picker.html".into()))
-        .title("选择提醒时间")
+    let url = format!("time-picker.html?kind={kind}&req={request_id}");
+    let title = match kind.as_str() {
+        "repeat" => "选择重复规则",
+        "tag" => "设置标签",
+        "intensity" => "选择提醒强度",
+        _ => "选择提醒时间",
+    };
+
+    let builder = WebviewWindowBuilder::new(&app, TIME_PICKER, WebviewUrl::App(url.into()))
+        .title(title)
         .inner_size(260.0, 420.0)
         .resizable(false)
         .decorations(true)
@@ -145,24 +154,24 @@ pub async fn open_time_picker(app: AppHandle) {
 
     match builder.build() {
         Ok(win) => {
-            println!("[time-picker] 窗口创建成功，居中并显示");
             let _ = win.center();
             let _ = win.show();
+            let _ = win.set_focus();
         }
-        Err(e) => eprintln!("[time-picker] 创建窗口失败: {e}"),
+        Err(e) => eprintln!("[marker-picker] 创建窗口失败: {e}"),
     }
 }
 
-/// 关闭时间选择器窗口。
+/// 关闭标记选择器窗口。
 ///
 /// 前端不能直接调 `getCurrentWindow().close()`——capability 只给了
 /// `core:default`，不含窗口关闭权限，那条调用会被静默拦截（连异常都不抛，
 /// 表现为点确定毫无反应，还能反复点出多个时间）。窗口操作一律走 Rust 侧。
 #[tauri::command]
 pub fn close_time_picker(app: AppHandle) {
-    if let Some(win) = app.get_webview_window("time-picker") {
+    if let Some(win) = app.get_webview_window(TIME_PICKER) {
         if let Err(e) = win.close() {
-            eprintln!("[time-picker] 关闭失败: {e}");
+            eprintln!("[marker-picker] 关闭失败: {e}");
         }
     }
 }

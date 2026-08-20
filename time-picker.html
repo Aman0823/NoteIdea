@@ -169,6 +169,44 @@
       .hidden {
         display: none;
       }
+
+      /* 通用列表（重复规则 / 提醒强度） */
+      .option-item {
+        padding: 10px 14px;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        cursor: pointer;
+        transition: all 0.15s;
+      }
+
+      .option-item:hover {
+        background: var(--border);
+        border-color: var(--accent);
+      }
+
+      .tag-input {
+        width: 100%;
+        padding: 12px;
+        background: var(--panel);
+        border: 2px solid var(--border);
+        border-radius: 8px;
+        color: var(--text);
+        font: inherit;
+        font-size: 15px;
+        outline: none;
+      }
+
+      .tag-input:focus {
+        border-color: var(--accent);
+      }
+
+      .picker-hint {
+        margin: 0;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.6;
+      }
     </style>
   </head>
   <body class="time-picker">
@@ -182,6 +220,18 @@
         <div class="date-item" data-type="nextMon">下周一</div>
         <div class="date-item" data-type="nextFri">下周五</div>
         <div class="date-item" data-type="custom">自定义日期</div>
+      </div>
+
+      <!-- 重复规则 / 提醒强度：单级列表 -->
+      <div id="option-list" class="date-list hidden"></div>
+
+      <!-- 标签：自由输入 -->
+      <div id="tag-panel" class="time-input hidden">
+        <input type="text" class="tag-input" id="tag-input" placeholder="标签名（不含空格）" />
+        <p class="picker-hint">
+          这一期还没有标签索引，无法列出已有标签，只能新建。含空格或引号的标签写不进行内语法，会被拒绝。
+        </p>
+        <button class="confirm-btn" id="tag-confirm">确定</button>
       </div>
 
       <!-- 第二级：时间输入 -->

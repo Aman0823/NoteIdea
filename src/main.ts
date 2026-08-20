@@ -463,12 +463,18 @@ async function openNote(path: string) {
   void primeParseCache(note.content.split('\n'));
 
   if (editor !== null) editor.destroy();
-  editor = createNoteEditor(editorHostEl, note.content, (update) => {
-    if (update.docChanged && unconfirmed !== null) {
-      unconfirmed = unconfirmed.compose(update.changes);
-      scheduleAutosave();
-    }
-  });
+  editor = createNoteEditor(
+    editorHostEl,
+    note.content,
+    (update) => {
+      if (update.docChanged && unconfirmed !== null) {
+        unconfirmed = unconfirmed.compose(update.changes);
+        scheduleAutosave();
+      }
+    },
+    // 点复选框、改 chip 是明确动作，不等 800ms（design E7）
+    () => void flush(),
+  );
   showEditor();
   markActive(currentPath);
 }

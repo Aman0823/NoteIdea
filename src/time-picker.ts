@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { emit } from '@tauri-apps/api/event'
+import type { MarkerValue } from './types/todo'
 
 // 关窗必须走 Rust：capability 只给了 core:default，前端直接
 // getCurrentWindow().close() 会被静默拦截，点了跟没点一样。
@@ -7,7 +8,21 @@ function closeWindow() {
   void invoke('close_time_picker')
 }
 
+// 发起方靠 query 传进来。结果是广播，不带 req 的话主编辑器点 chip
+// 会把速记条一起改掉。
+const params = new URLSearchParams(location.search)
+const kind = params.get('kind') ?? 'time'
+const requestId = params.get('req') ?? ''
+
+/** 选中结果一律是**结构化值**，规范文本由 Rust 序列化产出（design E5）。 */
+async function confirmValue(value: MarkerValue) {
+  await emit('marker-picker:selected', { requestId, value })
+  closeWindow()
+}
+
 const dateList = document.getElementById('date-list')!
+const optionList = document.getElementById('option-list')!
+const tagPanel = document.getElementById('tag-panel')!
 const timeInput = document.getElementById('time-input')!
 const backBtn = document.getElementById('back-btn')!
 const hourInput = document.getElementById('hour-input') as HTMLInputElement
@@ -15,6 +30,73 @@ const minuteInput = document.getElementById('minute-input') as HTMLInputElement
 const confirmBtn = document.getElementById('confirm-btn')!
 
 let selectedDateType: string = ''
+
+// ---------- 按 kind 决定显示哪个面板 ----------
+
+interface Option {
+  label: string
+  value: MarkerValue
+}
+
+const REPEAT_OPTIONS: Option[] = [
+  { label: '不重复', value: { kind: 'repeat', value: { kind: 'once' } } },
+  { label: '每天', value: { kind: 'repeat', value: { kind: 'daily' } } },
+  { label: '工作日', value: { kind: 'repeat', value: { kind: 'weekdays' } } },
+  { label: '每周', value: { kind: 'repeat', value: { kind: 'weekly' } } },
+  { label: '每月', value: { kind: 'repeat', value: { kind: 'monthly' } } },
+  { label: '每年', value: { kind: 'repeat', value: { kind: 'yearly' } } },
+  { label: '每 3 天', value: { kind: 'repeat', value: { kind: 'every_days', n: 3 } } },
+  { label: '每 2 周', value: { kind: 'repeat', value: { kind: 'every_weeks', n: 2 } } },
+]
+
+const INTENSITY_OPTIONS: Option[] = [
+  { label: '轻提示', value: { kind: 'intensity', value: 'toast' } },
+  { label: '响铃', value: { kind: 'intensity', value: 'ring' } },
+  { label: '全屏强提醒', value: { kind: 'intensity', value: 'full' } },
+]
+
+function renderOptions(options: Option[]) {
+  dateList.classList.add('hidden')
+  optionList.classList.remove('hidden')
+  optionList.replaceChildren()
+  for (const opt of options) {
+    const el = document.createElement('div')
+    el.className = 'option-item'
+    el.textContent = opt.label
+    el.addEventListener('click', () => void confirmValue(opt.value))
+    optionList.append(el)
+  }
+}
+
+switch (kind) {
+  case 'repeat':
+    renderOptions(REPEAT_OPTIONS)
+    break
+  case 'intensity':
+    renderOptions(INTENSITY_OPTIONS)
+    break
+  case 'tag': {
+    dateList.classList.add('hidden')
+    tagPanel.classList.remove('hidden')
+    const tagInput = document.getElementById('tag-input') as HTMLInputElement
+    const submitTag = () => {
+      const name = tagInput.value.trim()
+      if (name === '') return
+      void confirmValue({ kind: 'tag', value: name })
+    }
+    document.getElementById('tag-confirm')!.addEventListener('click', submitTag)
+    tagInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') submitTag()
+    })
+    setTimeout(() => tagInput.focus(), 0)
+    break
+  }
+  default:
+    // time：保持原有的两级流程
+    break
+}
+
+// ---------- 时间选择（kind = time） ----------
 
 // 日期类型点击
 dateList.addEventListener('click', (e) => {
@@ -93,12 +175,12 @@ setupInput(minuteInput, 59)
 
 // 确定按钮
 confirmBtn.addEventListener('click', async () => {
-  const hour = hourInput.value.padStart(2, '0')
-  const minute = minuteInput.value.padStart(2, '0')
+  const hour = parseInt(hourInput.value) || 0
+  const minute = parseInt(minuteInput.value) || 0
 
   // 计算日期
   const now = new Date()
-  let targetDate = new Date(now)
+  const targetDate = new Date(now)
 
   switch (selectedDateType) {
     case 'today':
@@ -140,16 +222,19 @@ confirmBtn.addEventListener('click', async () => {
       return
   }
 
-  const year = targetDate.getFullYear()
-  const month = String(targetDate.getMonth() + 1).padStart(2, '0')
-  const day = String(targetDate.getDate()).padStart(2, '0')
-
-  const result = `@${year}-${month}-${day} ${hour}:${minute}`
-
-  // 发送到速记条
-  await emit('time-picker:selected', result)
-
-  closeWindow()
+  // 只送结构，不拼文本：`@2026-08-14 18:00` 这串字由 Rust 序列化产出
+  await confirmValue({
+    kind: 'time',
+    value: {
+      date: {
+        kind: 'absolute',
+        year: targetDate.getFullYear(),
+        month: targetDate.getMonth() + 1,
+        day: targetDate.getDate(),
+      },
+      time: [hour, minute],
+    },
+  })
 })
 
 // ESC 关闭窗口

@@ -225,6 +225,25 @@ fn hash_content(content: String) -> String {
     actor::hash(&content)
 }
 
+/// 切换某一行的复选框状态，返回新行文本。
+///
+/// 前缀规则（缩进、`-` / `*` 列表符）只在 Rust 里定义一份，前端不该自己找
+/// `[` 在哪——那等于把语法规则抄第二遍。
+#[tauri::command]
+fn toggle_checkbox(line: String) -> Result<String, String> {
+    todo::syntax::toggle_checkbox(&line)
+}
+
+/// 把一个标记值写回某一行，返回新行文本（design E5 的硬边界）。
+///
+/// 任何进入文档的标记文本都必须从这里产出。前端只负责把用户的选择组装成
+/// 结构化的 MarkerValue，规范文本一律由 Rust 序列化——前端拼出来的格式
+/// 一旦和解析器有出入，就是写进文件、再也读不回来的脏数据。
+#[tauri::command]
+fn write_marker(line: String, value: todo::syntax::MarkerValue) -> Result<String, String> {
+    todo::syntax::write_marker_to_line(&line, &value)
+}
+
 /// 解析待办行（D3：返回完整结构而非 UI 指令）
 ///
 /// `bare = true` 时走 `parse_fragment`，不要求 GFM 复选框前缀——速记条里
@@ -508,7 +527,7 @@ pub fn run() {
             window::resize_quick,
             window::quick_warmed,
             window::hotkey_failures,
-            window::open_time_picker,
+            window::open_marker_picker,
             window::close_time_picker,
             capture,
             vault_state,
@@ -521,6 +540,8 @@ pub fn run() {
             read_note,
             parse_todo_lines,
             hash_content,
+            toggle_checkbox,
+            write_marker,
             list_tags,
             rescan_index,
             allocate_todo_id,

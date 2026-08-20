@@ -392,6 +392,33 @@ main.workspace {
   text-underline-offset: 2px;
 }
 
+/* 渲染态复选框：点一下即切换并立即落盘 */
+.ni-checkbox {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  margin-right: 2px;
+  border: 1.5px solid var(--muted);
+  border-radius: 3px;
+  color: var(--bg);
+  font-size: 10px;
+  line-height: 1;
+  vertical-align: -2px;
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+}
+
+.ni-checkbox:hover {
+  border-color: var(--accent);
+}
+
+.ni-checkbox-on {
+  background: var(--ok);
+  border-color: var(--ok);
+}
+
 .diagnostics {
   flex: none;
   max-height: 38vh;

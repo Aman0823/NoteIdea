@@ -11,7 +11,7 @@ import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirro
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown';
 import { syntaxHighlighting, HighlightStyle, indentOnInput } from '@codemirror/language';
 import { tags } from '@lezer/highlight';
-import { todoChips } from './decorations';
+import { todoChips, markerInteraction, flushRequest } from './decorations';
 
 // 深色主题，与 styles.css 的配色保持一致（--panel / --text / --accent）。
 const darkTheme = EditorView.theme(
@@ -62,6 +62,7 @@ export function createNoteEditor(
   parent: HTMLElement,
   initialContent: string,
   onChange: (update: ViewUpdate) => void,
+  onFlushRequest: () => void = () => {},
 ): NoteEditor {
   const extensions = [
     lineNumbers(),
@@ -74,6 +75,8 @@ export function createNoteEditor(
     indentOnInput(),
     syntaxHighlighting(mdHighlight),
     todoChips,
+    markerInteraction,
+    flushRequest.of(onFlushRequest),
     darkTheme,
     EditorView.lineWrapping,
     EditorView.updateListener.of(onChange),

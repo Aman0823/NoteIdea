@@ -323,6 +323,21 @@ fn todo_prefix(line: &str) -> Option<(bool, usize)> {
     None
 }
 
+/// 切换复选框状态，只改状态那一个字节。
+///
+/// `[x] ` 是四个字节，`todo_prefix` 返回的是它之后的位置，所以状态字符
+/// 在 `content_start - 3`。其余字节（缩进、列表符、正文、标记）一律不碰。
+pub fn toggle_checkbox(line: &str) -> Result<String, String> {
+    let (checked, content_start) = todo_prefix(line).ok_or("这一行不是待办，没有复选框可切换")?;
+    let idx = content_start - 3;
+
+    let mut out = String::with_capacity(line.len());
+    out.push_str(&line[..idx]);
+    out.push(if checked { ' ' } else { 'x' });
+    out.push_str(&line[idx + 1..]);
+    Ok(out)
+}
+
 /// 引号配对：返回所有引号内区间（未闭合的引号视为普通字符，不产生屏蔽区间）
 fn quoted_ranges(line: &str) -> Vec<Span> {
     let mut ranges = Vec::new();
@@ -978,6 +993,45 @@ mod tests {
 
         // ID：裸字符串
         assert_eq!(by_kind("id")["value"], serde_json::json!("a3f9"));
+    }
+
+    #[test]
+    fn test_toggle_checkbox_changes_one_byte_only() {
+        // 6.2：切换只改复选框字符，该行其余字节不变
+        let line = "  - [ ] 交周报 @2026-08-14 18:00 !daily #工作 ^ring ~a3f9";
+        let toggled = toggle_checkbox(line).unwrap();
+        assert_eq!(toggled, "  - [x] 交周报 @2026-08-14 18:00 !daily #工作 ^ring ~a3f9");
+        // 逐字节比对：只有一处不同
+        let diff = line
+            .bytes()
+            .zip(toggled.bytes())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert_eq!(diff, 1, "只该有一个字节不同");
+        assert_eq!(line.len(), toggled.len(), "长度不该变");
+    }
+
+    #[test]
+    fn test_toggle_checkbox_round_trip() {
+        let line = "- [x] 已完成";
+        let off = toggle_checkbox(line).unwrap();
+        assert_eq!(off, "- [ ] 已完成");
+        assert_eq!(toggle_checkbox(&off).unwrap(), "- [x] 已完成");
+    }
+
+    #[test]
+    fn test_toggle_checkbox_tolerates_bullet_and_indent_variants() {
+        assert_eq!(toggle_checkbox("* [ ] 星号列表").unwrap(), "* [x] 星号列表");
+        assert_eq!(toggle_checkbox("    - [ ] 深缩进").unwrap(), "    - [x] 深缩进");
+        // 大写 X 也认，切回来统一成小写
+        assert_eq!(toggle_checkbox("- [X] 大写").unwrap(), "- [ ] 大写");
+    }
+
+    #[test]
+    fn test_toggle_checkbox_rejects_non_todo() {
+        assert!(toggle_checkbox("普通段落").is_err());
+        assert!(toggle_checkbox("# 标题").is_err());
+        assert!(toggle_checkbox("").is_err());
     }
 
     // ---------- 0.3 序列化往返一致 ----------
