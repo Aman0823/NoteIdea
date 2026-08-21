@@ -239,10 +239,10 @@ async fn drain<R: tauri::Runtime>(
     loop {
         match step(db, vault_root).await {
             Step::Empty => return,
-            Step::Done(cs) => emit_changed(app, &cs),
+            Step::Done(id, cs) => emit_changed(app, id, &cs),
             Step::Retrying => {}
-            Step::Failed(cs, msg) => {
-                emit_failed(app, &cs, &msg);
+            Step::Failed(id, cs, msg) => {
+                emit_failed(app, id, &cs, &msg);
                 return;
             }
         }
@@ -251,15 +251,18 @@ async fn drain<R: tauri::Runtime>(
 
 /// 处理一条的结果。把「做了什么」与「怎么通知前端」分开，
 /// 这样队列逻辑本身可以脱离 Tauri 单测。
+///
+/// 带上队列 id：广播出去后，提交方靠它认出「这是我刚提交的那一批」，
+/// 从而标记已确认而不是当成远端变更再应用一遍（design E3）。
 pub enum Step {
     /// 队列空了。
     Empty,
     /// 成功落盘。
-    Done(ChangeSet),
+    Done(i64, ChangeSet),
     /// 本次失败但会重试，已等待过。
     Retrying,
     /// 放弃，记录留在队列等用户处理。
-    Failed(ChangeSet, String),
+    Failed(i64, ChangeSet, String),
 }
 
 /// 处理队列里的一条。
@@ -278,7 +281,7 @@ pub async fn step(db: &crate::db::Handle, vault_root: &Path) -> Step {
                     // 上次其实写成功了，只是没来得及删记录。补删，不重写。
                     println!("[actor] {} 的追加已生效，跳过重放", row.cs.file_path);
                     delete_row(db, row.id);
-                    return Step::Done(row.cs);
+                    return Step::Done(row.id, row.cs);
                 }
                 Ok(false) => {}
                 // 读不了文件就当没写过：宁可重放一次（最多多一行），
@@ -302,7 +305,7 @@ pub async fn step(db: &crate::db::Handle, vault_root: &Path) -> Step {
     match outcome {
         Ok(()) => {
             delete_row(db, row.id);
-            Step::Done(row.cs)
+            Step::Done(row.id, row.cs)
         }
         Err(WriteError::Retryable(msg)) if row.retries < MAX_RETRIES => {
             eprintln!("[actor] {} 写入失败（第 {} 次）: {msg}", row.cs.file_path, row.retries + 1);
@@ -314,7 +317,7 @@ pub async fn step(db: &crate::db::Handle, vault_root: &Path) -> Step {
             let msg = e.to_string();
             eprintln!("[actor] {} 写入放弃: {msg}", row.cs.file_path);
             mark_failed(db, row.id, &msg);
-            Step::Failed(row.cs, msg)
+            Step::Failed(row.id, row.cs, msg)
         }
     }
 }
@@ -435,19 +438,29 @@ fn mark_failed(db: &crate::db::Handle, id: i64, err: &str) {
     });
 }
 
-fn emit_changed<R: tauri::Runtime>(app: &tauri::AppHandle<R>, cs: &ChangeSet) {
+fn emit_changed<R: tauri::Runtime>(app: &tauri::AppHandle<R>, id: i64, cs: &ChangeSet) {
     use tauri::Emitter;
     let _ = app.emit(
         "file:changed",
-        serde_json::json!({ "file": cs.file_path, "op": cs.op.name(), "change_set": cs }),
+        serde_json::json!({
+            "id": id,
+            "file": cs.file_path,
+            "op": cs.op.name(),
+            "changeSet": cs,
+        }),
     );
 }
 
-fn emit_failed<R: tauri::Runtime>(app: &tauri::AppHandle<R>, cs: &ChangeSet, err: &str) {
+fn emit_failed<R: tauri::Runtime>(app: &tauri::AppHandle<R>, id: i64, cs: &ChangeSet, err: &str) {
     use tauri::Emitter;
     let _ = app.emit(
         "write:failed",
-        serde_json::json!({ "file": cs.file_path, "op": cs.op.name(), "error": err }),
+        serde_json::json!({
+            "id": id,
+            "file": cs.file_path,
+            "op": cs.op.name(),
+            "error": err,
+        }),
     );
 }
 
@@ -1048,7 +1061,7 @@ mod tests {
 
         assert!(matches!(step(&db, &t.0).await, Step::Failed(..)));
         // 第一条被标记 -1 后，第二条应能继续
-        assert!(matches!(step(&db, &t.0).await, Step::Done(_)));
+        assert!(matches!(step(&db, &t.0).await, Step::Done(..)));
         assert_eq!(t.read("inbox.md"), "- [ ] 后来的
 ");
     }
@@ -1132,7 +1145,7 @@ mod tests {
         // 修好原因后重试应当成功
         std::fs::remove_file(t.0.join("n.md")).unwrap();
         assert!(reset_failed(&db, id).unwrap());
-        assert!(matches!(step(&db, &t.0).await, Step::Done(_)));
+        assert!(matches!(step(&db, &t.0).await, Step::Done(..)));
         assert_eq!(t.read("n.md"), "x");
         assert!(list_failed(&db).unwrap().is_empty());
     }
@@ -1165,7 +1178,7 @@ mod tests {
         assert_eq!(queue_len(&db), 1, "记录必须还在");
 
         // 它仍应能正常落盘
-        assert!(matches!(step(&db, &t.0).await, Step::Done(_)));
+        assert!(matches!(step(&db, &t.0).await, Step::Done(..)));
         assert_eq!(t.read("inbox.md"), "a
 ");
     }

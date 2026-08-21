@@ -4,6 +4,13 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { ChangeSet } from '@codemirror/state';
 import { createNoteEditor, type NoteEditor } from './editor/editor';
 import { primeParseCache } from './editor/decorations';
+import {
+  applyRemote,
+  remoteChange,
+  toLocalChange,
+  type FileChangedEvent,
+  type WriteFailedEvent,
+} from './editor/sync';
 
 const diagnosticsEl = document.querySelector<HTMLElement>('#diagnostics')!;
 document.querySelector<HTMLButtonElement>('#diagnostics-toggle')!.addEventListener('click', () => {
@@ -277,6 +284,40 @@ let unconfirmed: ChangeSet | null = null;
 let autosaveTimer: number | null = null;
 let flushing = false;
 
+/**
+ * 已提交但还没收到落盘广播的批次（design E3 的「未确认变更」）。
+ *
+ * 提交后不能立刻把基线推进过去：actor 返回的只是「已入队」，真正落盘可能
+ * 稍后才失败（比如基线冲突）。所以这批变更要一直留着，直到 file:changed
+ * 带着同一个 id 回来才算数；失败则整批还回 unconfirmed，一个字都不丢。
+ */
+interface InFlight {
+  changes: ChangeSet;
+  /** 这批落盘后文件应有的内容，用来推进基线哈希。 */
+  content: string;
+}
+const inFlight = new Map<number, InFlight>();
+/** 等待某批次落盘结果的 flush 调用。 */
+const waiters = new Map<number, (ok: boolean) => void>();
+
+/** 正在等 apply_edits 返回队列 id：此刻收到的广播先攒着，拿到 id 再处理。 */
+let awaitingId = false;
+const deferredChanges: FileChangedEvent[] = [];
+
+/** 等落盘广播的上限。超时按成功处理——宁可少报错，也不卡住切换笔记。 */
+const CONFIRM_TIMEOUT_MS = 5000;
+
+/** 连续 rebase 重投失败多少次后放弃，转为可见失败（8.4）。 */
+const MAX_REBASE_RETRIES = 3;
+let rebaseFailures = 0;
+
+function settle(id: number, ok: boolean) {
+  const waiter = waiters.get(id);
+  if (waiter === undefined) return;
+  waiters.delete(id);
+  waiter(ok);
+}
+
 function resetEditor() {
   if (autosaveTimer !== null) {
     clearTimeout(autosaveTimer);
@@ -289,6 +330,9 @@ function resetEditor() {
   unconfirmed = null;
   savedHash = '';
   flushing = false;
+  for (const id of [...waiters.keys()]) settle(id, true);
+  inFlight.clear();
+  rebaseFailures = 0;
   editorHostEl.classList.add('hidden');
 }
 
@@ -305,6 +349,15 @@ function scheduleAutosave() {
   }, 800);
 }
 
+/**
+ * 提交缓冲里的变更，并**等到落盘结果回来**。
+ *
+ * 不能只等「已入队」：基线冲突、磁盘满这类失败都发生在入队之后，只等入队
+ * 的话切换笔记时探测不到，缓冲会连同界面一起消失（design E8）。
+ *
+ * 同一时刻只允许一批在飞：两批并行的话，第二批只能用还没确认的基线提交，
+ * 必然冲突，还要多一层坐标系换算。
+ */
 async function flush(): Promise<boolean> {
   if (flushing) return true;
   if (editor === null || currentPath === null || unconfirmed === null) return true;
@@ -323,24 +376,48 @@ async function flush(): Promise<boolean> {
   unconfirmed = ChangeSet.empty(editor.view.state.doc.length);
 
   flushing = true;
+  awaitingId = true;
+  let id: number;
   try {
-    await invoke('apply_edits', {
+    id = await invoke<number>('apply_edits', {
       filePath: currentPath,
       baseHash: savedHash,
       edits,
     });
-    // 落盘基线推进到提交时那份内容（baseContent），而非此刻可能又变了的缓冲。
-    savedHash = await invoke<string>('hash_content', { content: baseContent });
-    return true;
   } catch (e) {
     // 入队失败：把快照合并回 unconfirmed，用户已敲的内容不丢。
     unconfirmed = submitted.compose(unconfirmed);
     showSaveError(String(e));
-    return false;
-  } finally {
     flushing = false;
-    if (unconfirmed !== null && !unconfirmed.empty) scheduleAutosave();
+    awaitingId = false;
+    drainDeferred();
+    return false;
   }
+
+  // 入队成功，但还没落盘。基线要等 file:changed 带着这个 id 回来才推进。
+  inFlight.set(id, { changes: submitted, content: baseContent });
+  flushing = false;
+  awaitingId = false;
+  drainDeferred();
+
+  return await new Promise<boolean>((resolve) => {
+    // 广播可能已经在 drainDeferred 里处理掉了，那就别再等了
+    if (!inFlight.has(id)) {
+      resolve(true);
+      return;
+    }
+    waiters.set(id, resolve);
+    window.setTimeout(() => {
+      // 超时就别再挂着这条了，否则基线永远推进不了、后续每次提交都撞冲突
+      inFlight.delete(id);
+      settle(id, true);
+    }, CONFIRM_TIMEOUT_MS);
+  });
+}
+
+function drainDeferred() {
+  const queued = deferredChanges.splice(0);
+  for (const payload of queued) handleFileChanged(payload);
 }
 
 function showSaveError(message: string) {
@@ -350,6 +427,91 @@ function showSaveError(message: string) {
   box.textContent = `保存失败：${message}`;
   warningsEl.append(box);
 }
+
+// ---------- 落盘广播：确认自己那批、应用别人那批（design E3） ----------
+
+listen<FileChangedEvent>('file:changed', (event) => {
+  // 广播可能比 apply_edits 的返回值先到，此时 inFlight 里还没登记这个 id。
+  // 直接处理会把自己刚写的当成远端变更再应用一遍，那是能自我喂养的死循环。
+  if (awaitingId) {
+    deferredChanges.push(event.payload);
+    return;
+  }
+  handleFileChanged(event.payload);
+});
+
+function handleFileChanged(payload: FileChangedEvent) {
+  // 自己提交的那一批回来了：推进基线，不再重复应用一遍（design E3 第 2 条）
+  const mine = inFlight.get(payload.id);
+  if (mine !== undefined) {
+    inFlight.delete(payload.id);
+    rebaseFailures = 0;
+    void invoke<string>('hash_content', { content: mine.content }).then((h) => {
+      savedHash = h;
+      settle(payload.id, true);
+      // 期间又敲了字就接着存
+      if (unconfirmed !== null && !unconfirmed.empty) scheduleAutosave();
+    });
+    return;
+  }
+
+  // 别人写的。只关心当前打开的这篇。
+  if (editor === null || currentPath === null || payload.file !== currentPath) return;
+
+  const spec = toLocalChange(editor.view, payload.changeSet.op);
+  if (spec === null) {
+    // 映射不出来（多行同内容、偏移对不上）。宁可可见地提示，也不猜着改。
+    showSaveError(`${payload.file} 被其他地方改动，但无法安全合并，请手动重新打开该笔记`);
+    return;
+  }
+
+  const remote = applyRemote(editor.view, spec);
+
+  // 本地未确认的变更要在新基线上重映射，否则偏移全错位（design E3 第 3 条）
+  if (unconfirmed !== null) unconfirmed = unconfirmed.map(remote);
+
+  // 磁盘已经不是我们记的那份了，基线作废，重新取
+  void invoke<NoteContent>('read_note', { path: currentPath }).then((note) => {
+    savedHash = note.hash;
+  });
+}
+
+listen<WriteFailedEvent>('write:failed', (event) => {
+  const payload = event.payload;
+  const mine = inFlight.get(payload.id);
+  if (mine === undefined) return;
+  inFlight.delete(payload.id);
+
+  if (editor === null || currentPath === null) {
+    settle(payload.id, false);
+    return;
+  }
+
+  // 内容一个字都不能丢：这批变更还回未确认集合，等重投
+  unconfirmed = unconfirmed === null ? mine.changes : mine.changes.compose(unconfirmed);
+
+  rebaseFailures += 1;
+  if (rebaseFailures > MAX_REBASE_RETRIES) {
+    // 连续失败到上限：作为可见失败上报，缓冲内容仍在编辑器里（8.4）
+    showSaveError(
+      `${payload.error}（已重试 ${MAX_REBASE_RETRIES} 次仍失败，内容仍在编辑器中，未丢失）`,
+    );
+    settle(payload.id, false);
+    return;
+  }
+
+  // 基线冲突：取磁盘现在的哈希作为新基线，重投（design E2 / 8.3）
+  void invoke<NoteContent>('read_note', { path: currentPath })
+    .then((note) => {
+      savedHash = note.hash;
+      settle(payload.id, false);
+      void flush();
+    })
+    .catch((e: unknown) => {
+      showSaveError(String(e));
+      settle(payload.id, false);
+    });
+});
 
 // 窗口失焦或隐藏（主窗口关闭即隐藏）时立即落盘，不等 debounce。
 window.addEventListener('blur', () => {
@@ -467,10 +629,20 @@ async function openNote(path: string) {
     editorHostEl,
     note.content,
     (update) => {
-      if (update.docChanged && unconfirmed !== null) {
-        unconfirmed = unconfirmed.compose(update.changes);
-        scheduleAutosave();
+      if (!update.docChanged || unconfirmed === null) return;
+
+      // 远端变更已经由 sync 层用 unconfirmed.map() 单独记账了。这里再收一遍
+      // 就是同一个变更记两次，坐标系随即错乱——表现为自动保存把这份错乱的
+      // 变更反复写回磁盘，内容不停增殖。
+      let local: ChangeSet | null = null;
+      for (const tr of update.transactions) {
+        if (tr.annotation(remoteChange) === true) continue;
+        local = local === null ? tr.changes : local.compose(tr.changes);
       }
+      if (local === null || local.empty) return;
+
+      unconfirmed = unconfirmed.compose(local);
+      scheduleAutosave();
     },
     // 点复选框、改 chip 是明确动作，不等 800ms（design E7）
     () => void flush(),

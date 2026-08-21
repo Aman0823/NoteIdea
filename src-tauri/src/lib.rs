@@ -342,6 +342,9 @@ async fn create(
 }
 
 /// 提交主编辑器的字符偏移变更，基线不一致时由前端负责 rebase 后重投。
+///
+/// 返回的是**队列 id**，不是「已落盘」。落盘结果通过 `file:changed` /
+/// `write:failed` 广播，前端靠这个 id 认出哪一条是自己提交的（design E3）。
 #[tauri::command]
 async fn apply_edits(
     file_path: String,
@@ -349,7 +352,7 @@ async fn apply_edits(
     edits: Vec<actor::Edit>,
     vault: State<'_, VaultState>,
     actor: State<'_, actor::Handle>,
-) -> Result<(), String> {
+) -> Result<i64, String> {
     {
         let status = vault.0.lock().map_err(|_| "vault 状态锁失败")?;
         if let Some(reason) = status.reason() {
@@ -364,7 +367,6 @@ async fn apply_edits(
             base_hash: Some(base_hash),
         })
         .await
-        .map(|_| ())
 }
 
 /// 将分配的 ID 写回 md 文件（D6：写盘失败则整个操作失败）
