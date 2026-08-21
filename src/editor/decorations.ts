@@ -369,7 +369,12 @@ export function minimalChange(
 }
 
 /** 把 Rust 算出的新行文本落进缓冲，并立即请求落盘。 */
-function applyNewLineText(view: EditorView, lineFrom: number, oldText: string, newText: string) {
+export function applyNewLineText(
+  view: EditorView,
+  lineFrom: number,
+  oldText: string,
+  newText: string,
+) {
   const change = minimalChange(oldText, newText);
   if (change === null) return;
   view.dispatch({

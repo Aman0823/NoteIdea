@@ -13,6 +13,7 @@ import { languages } from '@codemirror/language-data';
 import { syntaxHighlighting, HighlightStyle, indentOnInput } from '@codemirror/language';
 import { tags } from '@lezer/highlight';
 import { todoChips, markerInteraction, flushRequest } from './decorations';
+import { assistInput } from './assist-adapter';
 
 // 深色主题，与 styles.css 的配色保持一致（--panel / --text / --accent）。
 const darkTheme = EditorView.theme(
@@ -99,6 +100,7 @@ export function createNoteEditor(
     syntaxHighlighting(mdHighlight),
     todoChips,
     markerInteraction,
+    assistInput,
     flushRequest.of(onFlushRequest),
     darkTheme,
     EditorView.lineWrapping,
